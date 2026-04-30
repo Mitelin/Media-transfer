@@ -9,6 +9,7 @@ Aktuální pravidla této verze:
 - jazyk se vyhodnocuje po relevantních monitored epizodách
 - fyzická `Season NN` složka se přesouvá jen jako celek, nikdy částečně
 - volné soubory bez `Season NN` složky můžou vytvořit partial per-file plán
+- partial přesun bere k videu i externí titulkové sidecary jako `S01E01.en.srt`
 - monitored/relevant epizoda bez souboru je hard stop pro celou season
 - unmonitoring se provádí podle konkrétních Sonarr episode IDs přesunutých položek
 - reálný move je chráněný kombinací `safety.dry_run: false`, `--execute`, Docker URL režimu a preflight kontrol
@@ -166,7 +167,7 @@ DRY RUN: would rescan series 123
 
 Unmonitoring se plánuje podle konkrétních přesouvaných Sonarr episode IDs, ne jen podle season flagu. To chrání případy, kde Sonarr fyzickou `Season 04` stále interně eviduje jako epizody jedné dlouhé season 1.
 
-Pro fyzické složky `Season 01`, `Season 02` atd. platí whole-season režim: pokud je season mix final a ne-final souborů, script nepřesune nic a čeká, dokud všechny relevantní epizody nejsou ve finálním jazyce. Pokud jsou soubory volně v kořenové/random složce bez `Season NN` adresáře, script může vytvořit partial plán po jednotlivých souborech: final EN/multilang EN soubory přesune a unmonitoruje, JP-only nebo missing epizody nechá na místě a dál monitored.
+Pro fyzické složky `Season 01`, `Season 02` atd. platí whole-season režim: pokud je season mix final a ne-final souborů, script nepřesune nic a čeká, dokud všechny relevantní epizody nejsou ve finálním jazyce. Pokud jsou soubory volně v kořenové/random složce bez `Season NN` adresáře, script může vytvořit partial plán po jednotlivých souborech: final EN/multilang EN soubory přesune a unmonitoruje, JP-only nebo missing epizody nechá na místě a dál monitored. Při partial přesunu přibalí externí titulky ve stejné složce se stejným základem názvu, například `A Gatherer's Adventure in Isekai S01E01.en.srt` k `A Gatherer's Adventure in Isekai S01E01.mp4`.
 
 Monitored/relevant epizoda bez souboru je hard stop pro celou danou season. Script ji bere jako signál, že season ještě vychází nebo není kompletní, a nepřesune nic ani v loose-folder režimu.
 

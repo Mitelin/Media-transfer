@@ -33,6 +33,7 @@ LANG_ALIASES = {
 }
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".wmv", ".ts"}
+SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
 
 
 @dataclass
@@ -930,19 +931,38 @@ def build_move_items(
     for episode in episodes:
         if not episode.path:
             continue
-        relative = media_relpath(media_normpath(episode.path), media_normpath(source_folder))
-        destination_path = media_join(destination_folder, relative)
-        temporary_destination_path = destination_path + temporary_suffix if use_temporary else None
-        move_items.append(
-            MoveItem(
-                episode_id=episode.episode_id,
-                episode_number=episode.episode_number,
-                source_path=episode.path,
-                destination_path=destination_path,
-                temporary_destination_path=temporary_destination_path,
+        for source_path in [episode.path, *find_subtitle_sidecars(episode.path)]:
+            relative = media_relpath(media_normpath(source_path), media_normpath(source_folder))
+            destination_path = media_join(destination_folder, relative)
+            temporary_destination_path = destination_path + temporary_suffix if use_temporary else None
+            move_items.append(
+                MoveItem(
+                    episode_id=episode.episode_id,
+                    episode_number=episode.episode_number,
+                    source_path=source_path,
+                    destination_path=destination_path,
+                    temporary_destination_path=temporary_destination_path,
+                )
             )
-        )
     return move_items
+
+
+def find_subtitle_sidecars(video_path: str) -> list[str]:
+    video_folder = os.path.dirname(video_path)
+    if not video_folder or not os.path.isdir(video_folder):
+        return []
+    video_stem, _ = os.path.splitext(os.path.basename(video_path))
+    sidecars: list[str] = []
+    for entry in sorted(os.listdir(video_folder)):
+        candidate_path = os.path.join(video_folder, entry)
+        if not os.path.isfile(candidate_path):
+            continue
+        candidate_stem, candidate_ext = os.path.splitext(entry)
+        if candidate_ext.lower() not in SUBTITLE_EXTENSIONS:
+            continue
+        if candidate_stem == video_stem or candidate_stem.startswith(video_stem + "."):
+            sidecars.append(candidate_path)
+    return sidecars
 
 
 def build_move_plan(

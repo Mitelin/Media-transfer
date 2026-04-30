@@ -616,6 +616,38 @@ class FinalizerHelperTests(unittest.TestCase):
             self.assertTrue((destination / "Episode 01.mkv").exists())
             self.assertTrue(blocked_file.exists())
 
+    def test_partial_move_includes_matching_subtitle_sidecars(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            destination = root / "destination"
+            source.mkdir()
+            video = source / "A Gatherer's Adventure in Isekai S01E01.mp4"
+            subtitle = source / "A Gatherer's Adventure in Isekai S01E01.en.srt"
+            unrelated_subtitle = source / "A Gatherer's Adventure in Isekai S01E02.en.srt"
+            video.write_text("video", encoding="utf-8")
+            subtitle.write_text("subtitle", encoding="utf-8")
+            unrelated_subtitle.write_text("other subtitle", encoding="utf-8")
+            episode = finalizer.EpisodeState(
+                episode_id=1,
+                episode_number=1,
+                monitored=True,
+                has_file=True,
+                episode_file_id=10,
+                path=str(video),
+                is_final=True,
+            )
+
+            items = finalizer.build_move_items([episode], str(source), str(destination), {"move_to_temporary_folder_first": True})
+            finalizer.move_episode_files(items, {"fail_if_destination_exists": True})
+
+            self.assertEqual([Path(item.source_path).name for item in items], [video.name, subtitle.name])
+            self.assertFalse(video.exists())
+            self.assertFalse(subtitle.exists())
+            self.assertTrue((destination / video.name).exists())
+            self.assertTrue((destination / subtitle.name).exists())
+            self.assertTrue(unrelated_subtitle.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
