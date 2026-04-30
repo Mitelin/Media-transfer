@@ -103,6 +103,93 @@ class FinalizerHelperTests(unittest.TestCase):
         self.assertEqual(languages["audio"], ["jp"])
         self.assertEqual(languages["subtitles"], [])
 
+    def test_validate_config_accepts_maintenance_mapping(self) -> None:
+        config = {
+            "active_instance": "tv",
+            "sonarr_instances": {
+                "tv": {
+                    "url": "http://sonarr:8989",
+                    "lan_url": "http://192.168.0.10:8989",
+                    "tailscale_url": "http://100.64.0.1:8989",
+                    "api_key": "secret",
+                    "instance_type": "tv",
+                    "maintenance_roots": {"staging_en": "/tv-en"},
+                }
+            },
+            "paths": {
+                "mappings": [
+                    {
+                        "instance_type": "tv",
+                        "source_prefix": "/tv-en",
+                        "target_prefix": "/tv-cz",
+                        "final_language": "cz",
+                    }
+                ],
+                "local_mounts": [],
+            },
+            "rules": {"tv": {"allowed_final_audio_languages": ["cz"]}},
+            "safety": {"dry_run": True},
+        }
+        errors, warnings = finalizer.validate_config(config)
+        self.assertEqual(errors, [])
+        self.assertEqual(warnings, [])
+
+    def test_validate_config_warns_for_empty_template_secret(self) -> None:
+        config = {
+            "active_instance": "anime",
+            "sonarr_instances": {
+                "anime": {
+                    "url": "http://sonarr-anime:8989",
+                    "lan_url": "http://192.168.0.10:8990",
+                    "tailscale_url": "http://100.64.0.1:8990",
+                    "api_key": "",
+                    "instance_type": "anime",
+                    "maintenance_roots": {"staging_jp": "/anime-jp"},
+                }
+            },
+            "paths": {
+                "mappings": [
+                    {
+                        "instance_type": "anime",
+                        "source_prefix": "/anime-jp",
+                        "target_prefix": "/anime-en",
+                        "final_language": "en",
+                    }
+                ]
+            },
+            "rules": {"anime": {"allowed_final_audio_languages": ["en"]}},
+        }
+        errors, warnings = finalizer.validate_config(config)
+        self.assertEqual(errors, [])
+        self.assertIn("sonarr_instances.anime.api_key is empty; fill it in local config before runtime", warnings)
+
+    def test_validate_config_rejects_invalid_mapping(self) -> None:
+        config = {
+            "active_instance": "tv",
+            "sonarr_instances": {
+                "tv": {
+                    "url": "http://sonarr:8989",
+                    "api_key": "secret",
+                    "instance_type": "tv",
+                    "maintenance_roots": {"staging_en": "/tv-en"},
+                }
+            },
+            "paths": {
+                "mappings": [
+                    {
+                        "instance_type": "tv",
+                        "source_prefix": "/tv-en",
+                        "target_prefix": "/tv-en",
+                        "final_language": "en",
+                    }
+                ]
+            },
+            "rules": {"tv": {"allowed_final_audio_languages": ["cz"]}},
+        }
+        errors, _ = finalizer.validate_config(config)
+        self.assertIn("paths.mappings[0].source_prefix and target_prefix must differ", errors)
+        self.assertIn("paths.mappings[0].final_language 'en' is not allowed by rules.tv", errors)
+
 
 if __name__ == "__main__":
     unittest.main()

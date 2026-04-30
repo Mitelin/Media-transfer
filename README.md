@@ -88,6 +88,14 @@ V Sonarr Docker containeru musí být dostupný také `ffprobe`, typicky z balí
 
 ## 3. Ruční dry-run test
 
+Nejdřív ověř samotný tvar konfigurace bez volání Sonarr API a bez čtení médií:
+
+```bash
+python3 scripts/sonarr_post_import_finalizer.py --config config/sonarr-finalizer.yml --validate-config
+```
+
+Prázdné API klíče v `config/sonarr-finalizer.example.yml` jsou jen warning, protože šablona nesmí obsahovat secrets. V lokálním `config/sonarr-finalizer.yml` je před reálným během doplň.
+
 Nejdřív lze otestovat samotné API a root folders bez Sonarr eventu:
 
 ```bash

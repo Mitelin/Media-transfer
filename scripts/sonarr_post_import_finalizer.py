@@ -207,6 +207,132 @@ def get_sonarr_base_url(instance: dict[str, Any], url_mode: str) -> str:
     return str(base_url)
 
 
+def validate_config(config: dict[str, Any]) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    instances = config.get("sonarr_instances")
+    if not isinstance(instances, dict) or not instances:
+        errors.append("sonarr_instances must be a non-empty mapping")
+        instances = {}
+
+    active_instance = config.get("active_instance")
+    if active_instance and active_instance not in instances:
+        errors.append(f"active_instance {active_instance!r} is not defined in sonarr_instances")
+
+    instance_types: set[str] = set()
+    for instance_name, instance in instances.items():
+        if not isinstance(instance, dict):
+            errors.append(f"sonarr_instances.{instance_name} must be a mapping")
+            continue
+        instance_type = str(instance.get("instance_type") or "")
+        if not instance_type:
+            errors.append(f"sonarr_instances.{instance_name}.instance_type is required")
+        else:
+            instance_types.add(instance_type)
+        for key in ("url", "lan_url", "tailscale_url"):
+            if not instance.get(key):
+                warnings.append(f"sonarr_instances.{instance_name}.{key} is empty")
+        api_key = str(instance.get("api_key") or "")
+        if not api_key:
+            warnings.append(f"sonarr_instances.{instance_name}.api_key is empty; fill it in local config before runtime")
+        roots = instance.get("maintenance_roots") or {}
+        if not isinstance(roots, dict) or not roots:
+            warnings.append(f"sonarr_instances.{instance_name}.maintenance_roots is empty")
+
+    rules_by_type = config.get("rules")
+    if not isinstance(rules_by_type, dict) or not rules_by_type:
+        errors.append("rules must be a non-empty mapping")
+        rules_by_type = {}
+    for instance_type in sorted(instance_types):
+        if instance_type not in rules_by_type:
+            errors.append(f"rules.{instance_type} is missing for configured Sonarr instance type")
+
+    paths = config.get("paths")
+    if not isinstance(paths, dict):
+        errors.append("paths must be a mapping")
+        paths = {}
+
+    mappings = paths.get("mappings") or []
+    if not isinstance(mappings, list) or not mappings:
+        errors.append("paths.mappings must be a non-empty list")
+        mappings = []
+    for index, mapping in enumerate(mappings):
+        label = f"paths.mappings[{index}]"
+        if not isinstance(mapping, dict):
+            errors.append(f"{label} must be a mapping")
+            continue
+        instance_type = str(mapping.get("instance_type") or "")
+        source_prefix = str(mapping.get("source_prefix") or "")
+        target_prefix = str(mapping.get("target_prefix") or "")
+        final_language = str(mapping.get("final_language") or "")
+        if not instance_type:
+            errors.append(f"{label}.instance_type is required")
+        elif instance_type not in instance_types:
+            errors.append(f"{label}.instance_type {instance_type!r} has no matching Sonarr instance")
+        if not source_prefix:
+            errors.append(f"{label}.source_prefix is required")
+        if not target_prefix:
+            errors.append(f"{label}.target_prefix is required")
+        if source_prefix and target_prefix and media_normpath(source_prefix) == media_normpath(target_prefix):
+            errors.append(f"{label}.source_prefix and target_prefix must differ")
+        if not final_language:
+            errors.append(f"{label}.final_language is required")
+        allowed = set((rules_by_type.get(instance_type) or {}).get("allowed_final_audio_languages") or [])
+        if final_language and allowed and final_language not in allowed:
+            errors.append(f"{label}.final_language {final_language!r} is not allowed by rules.{instance_type}")
+        if instance_type:
+            roots_for_type = maintenance_roots_for_instance_type(instances, instance_type)
+            if roots_for_type and source_prefix and source_prefix not in roots_for_type:
+                warnings.append(f"{label}.source_prefix {source_prefix!r} is not listed in maintenance_roots")
+
+    local_mounts = paths.get("local_mounts") or []
+    if not isinstance(local_mounts, list):
+        errors.append("paths.local_mounts must be a list")
+    else:
+        for index, mapping in enumerate(local_mounts):
+            label = f"paths.local_mounts[{index}]"
+            if not isinstance(mapping, dict):
+                errors.append(f"{label} must be a mapping")
+                continue
+            if not mapping.get("docker_prefix"):
+                errors.append(f"{label}.docker_prefix is required")
+            if not mapping.get("local_prefix"):
+                errors.append(f"{label}.local_prefix is required")
+
+    safety = config.get("safety") or {}
+    if not isinstance(safety, dict):
+        errors.append("safety must be a mapping")
+    elif not safety.get("dry_run", True):
+        warnings.append("safety.dry_run is false; runtime changes are possible when --execute is used")
+
+    return errors, warnings
+
+
+def maintenance_roots_for_instance_type(instances: dict[str, Any], instance_type: str) -> set[str]:
+    roots: set[str] = set()
+    for instance in instances.values():
+        if not isinstance(instance, dict) or instance.get("instance_type") != instance_type:
+            continue
+        maintenance_roots = instance.get("maintenance_roots") or {}
+        if isinstance(maintenance_roots, dict):
+            roots.update(str(value) for value in maintenance_roots.values() if value)
+    return roots
+
+
+def validate_config_command(config: dict[str, Any]) -> int:
+    errors, warnings = validate_config(config)
+    for warning in warnings:
+        LOG.warning("Config warning: %s", warning)
+    for error in errors:
+        LOG.error("Config error: %s", error)
+    if errors:
+        LOG.error("Config validation failed: %s error(s), %s warning(s)", len(errors), len(warnings))
+        return 2
+    LOG.info("Config validation OK: %s warning(s)", len(warnings))
+    return 0
+
+
 def test_sonarr_api(client: SonarrClient, instance: dict[str, Any], base_url: str) -> int:
     status = client.get_system_status()
     LOG.info(
@@ -752,6 +878,7 @@ def main() -> int:
     parser.add_argument("--config", type=Path, default=Path(os.environ.get("MEDIA_FINALIZER_CONFIG", default_config_path())))
     parser.add_argument("--instance", choices=["tv", "anime"], help="Override active_instance from config")
     parser.add_argument("--url-mode", choices=["docker", "lan", "tailscale"], default="docker")
+    parser.add_argument("--validate-config", action="store_true", help="Validate config structure without calling Sonarr or touching media files")
     parser.add_argument("--test-api", action="store_true", help="Only test Sonarr API connectivity and root folders")
     parser.add_argument("--list-series", action="store_true", help="List Sonarr series IDs and monitored seasons")
     parser.add_argument("--filter", help="Filter --list-series by title text")
@@ -779,6 +906,9 @@ def main() -> int:
     config = load_config(args.config)
     setup_logging(config, args.config)
     LOG.info("Config path: %s", args.config)
+
+    if args.validate_config:
+        return validate_config_command(config)
 
     sonarr_config = get_active_sonarr_config(config, args.instance)
     sonarr_base_url = get_sonarr_base_url(sonarr_config, args.url_mode)
