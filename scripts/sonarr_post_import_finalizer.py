@@ -10,7 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +78,26 @@ class EvaluationResult:
     target_language: str | None
     reason: str
     blocking_episodes: list[EpisodeState]
+
+
+@dataclass
+class MovePlan:
+    series_id: int
+    series_title: str
+    season_number: int
+    mapping_name: str | None
+    target_language: str | None
+    source_folder: str
+    destination_folder: str
+    temporary_destination_folder: str | None
+    dry_run: bool
+    move_method: str
+    will_move: bool
+    will_unmonitor: bool
+    will_rescan: bool
+    episode_count: int
+    relevant_episode_count: int
+    episode_file_count: int
 
 
 class SonarrClient:
@@ -814,6 +834,50 @@ def determine_destination(source_folder: str, mapping: dict[str, Any]) -> str:
     return media_join(target_prefix, relative)
 
 
+def build_move_plan(
+    season_state: SeasonState,
+    mapping: dict[str, Any],
+    destination: str,
+    result: EvaluationResult,
+    rules: dict[str, Any],
+    safety: dict[str, Any],
+    dry_run: bool,
+) -> MovePlan:
+    evaluate_monitored_only = bool(rules.get("evaluate_monitored_only", True))
+    relevant_episodes = [episode for episode in season_state.episodes if episode.monitored or not evaluate_monitored_only]
+    temporary_destination = None
+    if safety.get("move_to_temporary_folder_first", True):
+        temporary_destination = destination + str(safety.get("temporary_suffix", ".__moving__"))
+    return MovePlan(
+        series_id=season_state.series_id,
+        series_title=season_state.series_title,
+        season_number=season_state.season_number,
+        mapping_name=mapping.get("name"),
+        target_language=result.target_language,
+        source_folder=season_state.source_folder or "",
+        destination_folder=destination,
+        temporary_destination_folder=temporary_destination,
+        dry_run=dry_run,
+        move_method=str(safety.get("move_method", "shutil.move")),
+        will_move=True,
+        will_unmonitor=True,
+        will_rescan=True,
+        episode_count=len(season_state.episodes),
+        relevant_episode_count=len(relevant_episodes),
+        episode_file_count=sum(1 for episode in relevant_episodes if episode.has_file),
+    )
+
+
+def log_move_plan(plan: MovePlan) -> None:
+    LOG.info("Move plan: %s", json.dumps(asdict(plan), ensure_ascii=False, sort_keys=True))
+    action_prefix = "DRY RUN: would" if plan.dry_run else "EXECUTE: will"
+    LOG.info("%s move %s to %s", action_prefix, plan.source_folder, plan.destination_folder)
+    if plan.temporary_destination_folder:
+        LOG.info("%s use temporary destination %s", action_prefix, plan.temporary_destination_folder)
+    LOG.info("%s unmonitor season %s", action_prefix, plan.season_number)
+    LOG.info("%s rescan series %s", action_prefix, plan.series_id)
+
+
 def folder_has_conflict(destination: str) -> bool:
     if not os.path.exists(destination):
         return False
@@ -997,14 +1061,13 @@ def main() -> int:
         return 2
 
     destination = determine_destination(season_state.source_folder, mapping)
+    move_plan = build_move_plan(season_state, mapping, destination, result, rules, safety, dry_run)
     LOG.info("Selected mapping: %s", mapping.get("name"))
     LOG.info("Source folder: %s", season_state.source_folder)
     LOG.info("Destination folder: %s", destination)
+    log_move_plan(move_plan)
 
     if dry_run:
-        LOG.info("DRY RUN: would move %s to %s", season_state.source_folder, destination)
-        LOG.info("DRY RUN: would unmonitor season %s", season_state.season_number)
-        LOG.info("DRY RUN: would rescan series %s", season_state.series_id)
         return 0
 
     if safety.get("fail_if_destination_exists", True) and folder_has_conflict(destination):

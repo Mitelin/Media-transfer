@@ -141,6 +141,16 @@ Pro ruční simulaci eventu v dry-run režimu:
 python3 scripts/sonarr_post_import_finalizer.py --config config/sonarr-finalizer.yml --instance anime --url-mode lan --series-id 1 --season-number 1 --imported-file-path "/anime-jp/Test/Season 01/Test S01E01.mkv"
 ```
 
+Když season projde jazykovou evaluací, dry-run vypíše strukturovaný `Move plan` JSON a potom čitelné kroky:
+
+```text
+Move plan: {...}
+DRY RUN: would move /tv-en/Example/Season 02 to /tv-cz/Example/Season 02
+DRY RUN: would use temporary destination /tv-cz/Example/Season 02.__moving__
+DRY RUN: would unmonitor season 2
+DRY RUN: would rescan series 123
+```
+
 Linux/Sonarr container styl:
 
 ```bash

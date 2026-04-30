@@ -190,6 +190,82 @@ class FinalizerHelperTests(unittest.TestCase):
         self.assertIn("paths.mappings[0].source_prefix and target_prefix must differ", errors)
         self.assertIn("paths.mappings[0].final_language 'en' is not allowed by rules.tv", errors)
 
+    def test_build_move_plan_summarizes_final_action(self) -> None:
+        season_state = finalizer.SeasonState(
+            series_id=42,
+            series_title="Example Show",
+            season_number=2,
+            source_folder="/tv-en/Example Show/Season 02",
+            episodes=[
+                finalizer.EpisodeState(
+                    episode_id=1,
+                    episode_number=1,
+                    monitored=True,
+                    has_file=True,
+                    episode_file_id=101,
+                    path="/tv-en/Example Show/Season 02/Episode 01.mkv",
+                ),
+                finalizer.EpisodeState(
+                    episode_id=2,
+                    episode_number=2,
+                    monitored=False,
+                    has_file=True,
+                    episode_file_id=102,
+                    path="/tv-en/Example Show/Season 02/Episode 02.mkv",
+                ),
+            ],
+        )
+        mapping = {
+            "name": "TV English maintenance to Czech target",
+            "source_prefix": "/tv-en",
+            "target_prefix": "/tv-cz",
+        }
+        result = finalizer.EvaluationResult(True, "cz", "all relevant episodes are final", [])
+        plan = finalizer.build_move_plan(
+            season_state,
+            mapping,
+            "/tv-cz/Example Show/Season 02",
+            result,
+            {"evaluate_monitored_only": True},
+            {"move_to_temporary_folder_first": True, "temporary_suffix": ".__moving__"},
+            dry_run=True,
+        )
+
+        self.assertEqual(plan.series_id, 42)
+        self.assertEqual(plan.mapping_name, "TV English maintenance to Czech target")
+        self.assertEqual(plan.source_folder, "/tv-en/Example Show/Season 02")
+        self.assertEqual(plan.destination_folder, "/tv-cz/Example Show/Season 02")
+        self.assertEqual(plan.temporary_destination_folder, "/tv-cz/Example Show/Season 02.__moving__")
+        self.assertTrue(plan.dry_run)
+        self.assertTrue(plan.will_move)
+        self.assertTrue(plan.will_unmonitor)
+        self.assertTrue(plan.will_rescan)
+        self.assertEqual(plan.episode_count, 2)
+        self.assertEqual(plan.relevant_episode_count, 1)
+        self.assertEqual(plan.episode_file_count, 1)
+
+    def test_build_move_plan_can_disable_temporary_destination(self) -> None:
+        season_state = finalizer.SeasonState(
+            series_id=7,
+            series_title="Example Anime",
+            season_number=1,
+            source_folder="/anime-jp/Example Anime/Season 01",
+            episodes=[],
+        )
+        plan = finalizer.build_move_plan(
+            season_state,
+            {"source_prefix": "/anime-jp", "target_prefix": "/anime-en"},
+            "/anime-en/Example Anime/Season 01",
+            finalizer.EvaluationResult(True, "en", "all relevant episodes are final", []),
+            {"evaluate_monitored_only": True},
+            {"move_to_temporary_folder_first": False},
+            dry_run=False,
+        )
+
+        self.assertIsNone(plan.temporary_destination_folder)
+        self.assertFalse(plan.dry_run)
+        self.assertEqual(plan.move_method, "shutil.move")
+
 
 if __name__ == "__main__":
     unittest.main()
