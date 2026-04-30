@@ -216,7 +216,7 @@ Před skutečným přesunem script provede move preflight:
 source folder musí existovat a být složka
 destination nesmí existovat
 temporary destination nesmí existovat
-destination parent se případně vytvoří
+destination parent se vytvoří až při execute, pokud celý preflight projde bez chyb
 ```
 
 Pokud preflight najde chybu, script nepřesune soubory, neunmonitoruje epizody a nespustí rescan.

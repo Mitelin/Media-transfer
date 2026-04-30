@@ -1060,7 +1060,7 @@ def preflight_move_plan(plan: MovePlan, safety: dict[str, Any]) -> MovePreflight
             elif os.path.exists(item_parent) and not os.path.isdir(item_parent):
                 errors.append(f"destination parent exists but is not a directory: {item_parent}")
             elif not os.path.exists(item_parent):
-                warning = f"destination parent will be created: {item_parent}"
+                warning = f"destination parent would be created if preflight passes: {item_parent}"
                 if warning not in warnings:
                     warnings.append(warning)
         return MovePreflightResult(errors, warnings)
@@ -1077,7 +1077,7 @@ def preflight_move_plan(plan: MovePlan, safety: dict[str, Any]) -> MovePreflight
     elif os.path.exists(destination_parent) and not os.path.isdir(destination_parent):
         errors.append(f"destination parent exists but is not a directory: {destination_parent}")
     elif not os.path.exists(destination_parent):
-        warnings.append(f"destination parent will be created: {destination_parent}")
+        warnings.append(f"destination parent would be created if preflight passes: {destination_parent}")
 
     return MovePreflightResult(errors, warnings)
 
@@ -1089,6 +1089,7 @@ def log_move_preflight(result: MovePreflightResult) -> None:
         LOG.error("Move preflight error: %s", error)
     if result.errors:
         LOG.error("Move preflight failed: %s error(s), %s warning(s)", len(result.errors), len(result.warnings))
+        LOG.error("Move preflight failed before creating missing destination parents")
     else:
         LOG.info("Move preflight OK: %s warning(s)", len(result.warnings))
 
