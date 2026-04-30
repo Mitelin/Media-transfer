@@ -178,7 +178,7 @@ class FinalizerHelperTests(unittest.TestCase):
                 "local_mounts": [
                     {
                         "docker_prefix": "/anime-en",
-                        "local_prefix": r"\\192.168.60.20\admin\ANIME\English",
+                        "local_prefix": r"\\NAS_HOST\share\ANIME\English",
                     }
                 ]
             }
@@ -193,7 +193,7 @@ class FinalizerHelperTests(unittest.TestCase):
             enable_local_mounts=True,
         )
         self.assertEqual(untranslated, "/anime-en/Example/Season 01/Episode 01.mkv")
-        self.assertEqual(translated, r"\\192.168.60.20\admin\ANIME\English\Example\Season 01\Episode 01.mkv")
+        self.assertEqual(translated, r"\\NAS_HOST\share\ANIME\English\Example\Season 01\Episode 01.mkv")
 
     def test_detect_sonarr_file_languages_from_languages_and_media_info(self) -> None:
         episode_file = {
@@ -225,8 +225,8 @@ class FinalizerHelperTests(unittest.TestCase):
             "sonarr_instances": {
                 "tv": {
                     "url": "http://sonarr:8989",
-                    "lan_url": "http://192.168.0.10:8989",
-                    "tailscale_url": "http://100.64.0.1:8989",
+                    "lan_url": "http://LAN_SONARR_HOST:8989",
+                    "tailscale_url": "http://TAILSCALE_SONARR_HOST:8989",
                     "api_key": "secret",
                     "instance_type": "tv",
                     "maintenance_roots": {"staging_en": "/tv-en"},
@@ -256,8 +256,8 @@ class FinalizerHelperTests(unittest.TestCase):
             "sonarr_instances": {
                 "anime": {
                     "url": "http://sonarr-anime:8989",
-                    "lan_url": "http://192.168.0.10:8990",
-                    "tailscale_url": "http://100.64.0.1:8990",
+                    "lan_url": "http://LAN_SONARR_HOST:8990",
+                    "tailscale_url": "http://TAILSCALE_SONARR_HOST:8990",
                     "api_key": "",
                     "instance_type": "anime",
                     "maintenance_roots": {"staging_jp": "/anime-jp"},

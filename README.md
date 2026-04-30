@@ -37,14 +37,14 @@ active_instance: "anime"
 sonarr_instances:
   anime:
     url: "http://sonarr-anime:8989"
-    lan_url: "http://192.168.50.131:8990"
-    tailscale_url: "http://100.116.130.21:8990"
+    lan_url: "http://LAN_SONARR_HOST:8990"
+    tailscale_url: "http://TAILSCALE_SONARR_HOST:8990"
     api_key: "PUT_ANIME_SONARR_API_KEY_HERE"
 
   tv:
     url: "http://sonarr:8989"
-    lan_url: "http://192.168.50.131:8989"
-    tailscale_url: "http://100.116.130.21:8989"
+    lan_url: "http://LAN_SONARR_HOST:8989"
+    tailscale_url: "http://TAILSCALE_SONARR_HOST:8989"
     api_key: "PUT_TV_SONARR_API_KEY_HERE"
 ```
 
@@ -68,13 +68,13 @@ Pro read-only vývoj z Windows jsou v configu také lokální mount překlady:
 paths:
   local_mounts:
     - docker_prefix: "/anime-en"
-      local_prefix: '\\192.168.60.20\admin\ANIME\English'
+      local_prefix: '\\NAS_HOST\share\ANIME\English'
     - docker_prefix: "/anime-jp"
-      local_prefix: '\\192.168.60.20\admin\ANIME\Japanese'
+      local_prefix: '\\NAS_HOST\share\ANIME\Japanese'
     - docker_prefix: "/tv-cz"
-      local_prefix: '\\192.168.60.20\admin\SERIALY\Czech'
+      local_prefix: '\\NAS_HOST\share\SERIALY\Czech'
     - docker_prefix: "/tv-en"
-      local_prefix: '\\192.168.60.20\admin\SERIALY\English'
+      local_prefix: '\\NAS_HOST\share\SERIALY\English'
 ```
 
 Tyto překlady se používají jen pro lokální čtení souborů a `ffprobe` testy. Plánovaný move a Sonarr logika stále pracují s Docker cestami.
