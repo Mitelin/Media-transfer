@@ -4,6 +4,15 @@ Python finalizer pro Sonarr post-import/post-upgrade workflow. První verze je b
 
 Důležité: script pracuje jen s údržbovými knihovnami v `source_prefix`. Cílovou knihovnu nevyhodnocuje a nepoužívá jako Sonarr pracovní stav. Pokud je cílem CZ, údržbová knihovna je typicky English a z ní se hotová season převádí do CZ cíle.
 
+Aktuální pravidla této verze:
+
+- jazyk se vyhodnocuje po relevantních monitored epizodách
+- fyzická `Season NN` složka se přesouvá jen jako celek, nikdy částečně
+- volné soubory bez `Season NN` složky můžou vytvořit partial per-file plán
+- monitored/relevant epizoda bez souboru je hard stop pro celou season
+- unmonitoring se provádí podle konkrétních Sonarr episode IDs přesunutých položek
+- reálný move je chráněný kombinací `safety.dry_run: false`, `--execute`, Docker URL režimu a preflight kontrol
+
 ## 1. Doplnění konfigurace
 
 Vytvoř lokální config ze šablony:
@@ -119,6 +128,8 @@ Pro rychlou inspekci season bez `ffprobe` a bez sahání na soubory:
 python3 scripts/sonarr_post_import_finalizer.py --config config/sonarr-finalizer.yml --instance anime --url-mode lan --series-id 1 --season-number 1 --inspect-season
 ```
 
+Script preferuje season z fyzické cesty souboru (`Season 04`, `S04E01`) před `seasonNumber` metadaty ze Sonarru. To je důležité pro anime, kde Sonarr někdy drží všechny epizody jako season 1, ale soubory jsou správně rozdělené do složek `Season 01`, `Season 02` atd. Epizody bez souboru se berou podle Sonarr season metadat, takže untrackované epizody bez path neblokují přesun jiné fyzické season.
+
 Plná evaluace bez `--inspect-season` potřebuje běžet tam, kde existují Sonarr media cesty jako `/anime-en`, `/anime-jp`, `/tv-cz` a `/tv-en`. Z Windows přes LAN API tedy čekej bezpečný výsledek typu `file does not exist on disk`, pokud tyto Docker paths nejsou lokálně namountované.
 
 Pokud chceš z Windows použít lokální UNC mounty a reálný `ffprobe`, přidej `--enable-local-mounts`:
@@ -135,6 +146,8 @@ allow_sonarr_language_fallback: true
 
 Když soubor není lokálně dostupný, script může pro diagnostiku použít `episodefile.languages` a `episodefile.mediaInfo` ze Sonarr API. Při běhu uvnitř Dockeru s dostupnými media mounty má přednost `ffprobe`.
 
+Pokud `ffprobe` najde jen část jazyků, ale Sonarr metadata obsahují další audio/subtitle jazyky, script je při zapnutém fallbacku sloučí. V logu je takový případ označený jako `ffprobe-sonarr-api-merged`.
+
 Pro ruční simulaci eventu v dry-run režimu:
 
 ```bash
@@ -147,9 +160,15 @@ Když season projde jazykovou evaluací, dry-run vypíše strukturovaný `Move p
 Move plan: {...}
 DRY RUN: would move /tv-en/Example/Season 02 to /tv-cz/Example/Season 02
 DRY RUN: would use temporary destination /tv-cz/Example/Season 02.__moving__
-DRY RUN: would unmonitor season 2
+DRY RUN: would unmonitor moved episodes for season 2: [1234, 1235]
 DRY RUN: would rescan series 123
 ```
+
+Unmonitoring se plánuje podle konkrétních přesouvaných Sonarr episode IDs, ne jen podle season flagu. To chrání případy, kde Sonarr fyzickou `Season 04` stále interně eviduje jako epizody jedné dlouhé season 1.
+
+Pro fyzické složky `Season 01`, `Season 02` atd. platí whole-season režim: pokud je season mix final a ne-final souborů, script nepřesune nic a čeká, dokud všechny relevantní epizody nejsou ve finálním jazyce. Pokud jsou soubory volně v kořenové/random složce bez `Season NN` adresáře, script může vytvořit partial plán po jednotlivých souborech: final EN/multilang EN soubory přesune a unmonitoruje, JP-only nebo missing epizody nechá na místě a dál monitored.
+
+Monitored/relevant epizoda bez souboru je hard stop pro celou danou season. Script ji bere jako signál, že season ještě vychází nebo není kompletní, a nepřesune nic ani v loose-folder režimu.
 
 Linux/Sonarr container styl:
 
@@ -199,7 +218,7 @@ temporary destination nesmí existovat
 destination parent se případně vytvoří
 ```
 
-Pokud preflight najde chybu, script nepřesune soubory, neunmonitoruje season a nespustí rescan.
+Pokud preflight najde chybu, script nepřesune soubory, neunmonitoruje epizody a nespustí rescan.
 
 ## 5. Sonarr Custom Script wrappery
 

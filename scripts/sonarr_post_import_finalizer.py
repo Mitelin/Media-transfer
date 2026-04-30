@@ -81,6 +81,15 @@ class EvaluationResult:
 
 
 @dataclass
+class MoveItem:
+    episode_id: int
+    episode_number: int | None
+    source_path: str
+    destination_path: str
+    temporary_destination_path: str | None
+
+
+@dataclass
 class MovePlan:
     series_id: int
     series_title: str
@@ -92,9 +101,12 @@ class MovePlan:
     temporary_destination_folder: str | None
     dry_run: bool
     move_method: str
+    partial_move: bool
     will_move: bool
     will_unmonitor: bool
     will_rescan: bool
+    unmonitor_episode_ids: list[int]
+    move_items: list[MoveItem]
     episode_count: int
     relevant_episode_count: int
     episode_file_count: int
@@ -127,6 +139,11 @@ class SonarrClient:
         response.raise_for_status()
         return response.json()
 
+    def put_json(self, path: str, payload: Any) -> Any:
+        response = self.session.put(f"{self.base_url}{path}", json=payload, timeout=30)
+        response.raise_for_status()
+        return response.json()
+
     def get_series(self, series_id: int) -> dict[str, Any]:
         return self.get(f"/api/v3/series/{series_id}")
 
@@ -153,6 +170,11 @@ class SonarrClient:
                 self.put(f"/api/v3/series/{series_id}", series)
                 return
         raise RuntimeError(f"Season {season_number} not found for series {series_id}")
+
+    def unmonitor_episodes(self, episode_ids: list[int]) -> None:
+        if not episode_ids:
+            return
+        self.put_json("/api/v3/episode/monitor", {"episodeIds": episode_ids, "monitored": False})
 
     def rescan_series(self, series_id: int) -> None:
         self.post("/api/v3/command", {"name": "RescanSeries", "seriesId": series_id})
@@ -431,9 +453,9 @@ def infer_season_from_path(path: str | None) -> int | None:
 
 def build_event_context(env: dict[str, str]) -> EventContext:
     imported_file_path = env.get("sonarr_episodefile_path") or env.get("sonarr_episodefile_relativepath")
-    season_number = parse_int(env.get("sonarr_episodefile_seasonnumber"))
+    season_number = infer_season_from_path(imported_file_path)
     if season_number is None:
-        season_number = infer_season_from_path(imported_file_path)
+        season_number = parse_int(env.get("sonarr_episodefile_seasonnumber"))
 
     return EventContext(
         event_type=env.get("sonarr_eventtype", ""),
@@ -449,12 +471,13 @@ def build_event_context(env: dict[str, str]) -> EventContext:
 def apply_manual_event_overrides(context: EventContext, args: argparse.Namespace) -> EventContext:
     if args.series_id is not None:
         context.series_id = args.series_id
-    if args.season_number is not None:
-        context.season_number = args.season_number
     if args.imported_file_path:
         context.imported_file_path = args.imported_file_path
-        if context.season_number is None:
-            context.season_number = infer_season_from_path(args.imported_file_path)
+        inferred_season = infer_season_from_path(args.imported_file_path)
+        if args.season_number is None and inferred_season is not None:
+            context.season_number = inferred_season
+    if args.season_number is not None:
+        context.season_number = args.season_number
     if args.event_type:
         context.event_type = args.event_type
     elif context.series_id is not None and context.season_number is not None and not context.event_type:
@@ -469,9 +492,9 @@ def resolve_missing_event_context(context: EventContext, episode_files: list[dic
         return context
     for episode_file in episode_files:
         if episode_file.get("id") == context.episode_file_id:
-            season = parse_int(episode_file.get("seasonNumber"))
+            season = infer_season_from_path(episode_file.get("path"))
             if season is None:
-                season = infer_season_from_path(episode_file.get("path"))
+                season = parse_int(episode_file.get("seasonNumber"))
             context.season_number = season
             if not context.imported_file_path:
                 context.imported_file_path = episode_file.get("path")
@@ -580,6 +603,14 @@ def episode_file_by_id(episode_files: list[dict[str, Any]]) -> dict[int, dict[st
     return indexed
 
 
+def episode_belongs_to_season(episode: dict[str, Any], episode_file: dict[str, Any] | None, season_number: int) -> bool:
+    path = episode_file.get("path") if episode_file else None
+    path_season = infer_season_from_path(path)
+    if path_season is not None:
+        return path_season == season_number
+    return parse_int(episode.get("seasonNumber")) == season_number
+
+
 def build_season_state(
     series: dict[str, Any],
     episodes: list[dict[str, Any]],
@@ -590,13 +621,14 @@ def build_season_state(
         raise ValueError("series_id and season_number are required")
 
     files_by_id = episode_file_by_id(episode_files)
-    season_episodes = [episode for episode in episodes if episode.get("seasonNumber") == context.season_number]
     states: list[EpisodeState] = []
     source_candidates: list[str] = []
 
-    for episode in season_episodes:
+    for episode in episodes:
         episode_file_id = parse_int(episode.get("episodeFileId"))
         episode_file = files_by_id.get(episode_file_id) if episode_file_id is not None else None
+        if not episode_belongs_to_season(episode, episode_file, context.season_number):
+            continue
         path = episode_file.get("path") if episode_file else None
         has_file = bool(episode.get("hasFile")) and bool(path)
         sonarr_languages = detect_sonarr_file_languages(episode_file)
@@ -786,6 +818,19 @@ def evaluate_season_final(
                     episode.audio_languages,
                     episode.subtitle_languages,
                 )
+            elif allow_sonarr_fallback and (episode.sonarr_audio_languages or episode.sonarr_subtitle_languages):
+                merged_audio = sorted(set(episode.audio_languages).union(episode.sonarr_audio_languages))
+                merged_subtitles = sorted(set(episode.subtitle_languages).union(episode.sonarr_subtitle_languages))
+                if merged_audio != episode.audio_languages or merged_subtitles != episode.subtitle_languages:
+                    episode.audio_languages = merged_audio
+                    episode.subtitle_languages = merged_subtitles
+                    episode.language_detection_source = "ffprobe-sonarr-api-merged"
+                    LOG.info(
+                        "Episode %s supplementing ffprobe with Sonarr metadata audio=%s subtitles=%s",
+                        episode.episode_number,
+                        episode.audio_languages,
+                        episode.subtitle_languages,
+                    )
 
         final_by_audio = bool(allowed_audio.intersection(episode.audio_languages))
         final_by_subtitle = allow_subtitles and bool(allowed_audio.intersection(episode.subtitle_languages))
@@ -840,6 +885,64 @@ def determine_destination(source_folder: str, mapping: dict[str, Any]) -> str:
     return media_join(target_prefix, relative)
 
 
+def media_basename(path: str) -> str:
+    if is_posix_media_path(path):
+        return posixpath.basename(path)
+    return os.path.basename(path)
+
+
+def media_relpath(path: str, start: str) -> str:
+    if is_posix_media_path(path) and is_posix_media_path(start):
+        return posixpath.relpath(path, start)
+    return os.path.relpath(path, start)
+
+
+def is_physical_season_folder(path: str | None) -> bool:
+    if not path:
+        return False
+    return bool(re.fullmatch(r"Season[ ._-]*\d{1,2}", media_basename(media_normpath(path)), flags=re.IGNORECASE))
+
+
+def relevant_episodes_for_rules(season_state: SeasonState, rules: dict[str, Any]) -> list[EpisodeState]:
+    evaluate_monitored_only = bool(rules.get("evaluate_monitored_only", True))
+    return [episode for episode in season_state.episodes if episode.monitored or not evaluate_monitored_only]
+
+
+def movable_final_episodes(season_state: SeasonState, rules: dict[str, Any]) -> list[EpisodeState]:
+    return [episode for episode in relevant_episodes_for_rules(season_state, rules) if episode.is_final and episode.path]
+
+
+def missing_required_episodes(season_state: SeasonState, rules: dict[str, Any]) -> list[EpisodeState]:
+    return [episode for episode in relevant_episodes_for_rules(season_state, rules) if not episode.has_file]
+
+
+def build_move_items(
+    episodes: list[EpisodeState],
+    source_folder: str,
+    destination_folder: str,
+    safety: dict[str, Any],
+) -> list[MoveItem]:
+    move_items: list[MoveItem] = []
+    use_temporary = bool(safety.get("move_to_temporary_folder_first", True))
+    temporary_suffix = str(safety.get("temporary_suffix", ".__moving__"))
+    for episode in episodes:
+        if not episode.path:
+            continue
+        relative = media_relpath(media_normpath(episode.path), media_normpath(source_folder))
+        destination_path = media_join(destination_folder, relative)
+        temporary_destination_path = destination_path + temporary_suffix if use_temporary else None
+        move_items.append(
+            MoveItem(
+                episode_id=episode.episode_id,
+                episode_number=episode.episode_number,
+                source_path=episode.path,
+                destination_path=destination_path,
+                temporary_destination_path=temporary_destination_path,
+            )
+        )
+    return move_items
+
+
 def build_move_plan(
     season_state: SeasonState,
     mapping: dict[str, Any],
@@ -849,11 +952,15 @@ def build_move_plan(
     safety: dict[str, Any],
     dry_run: bool,
 ) -> MovePlan:
-    evaluate_monitored_only = bool(rules.get("evaluate_monitored_only", True))
-    relevant_episodes = [episode for episode in season_state.episodes if episode.monitored or not evaluate_monitored_only]
+    relevant_episodes = relevant_episodes_for_rules(season_state, rules)
+    partial_move = not result.is_final
+    move_episodes = movable_final_episodes(season_state, rules) if partial_move else relevant_episodes
     temporary_destination = None
-    if safety.get("move_to_temporary_folder_first", True):
+    if not partial_move and safety.get("move_to_temporary_folder_first", True):
         temporary_destination = destination + str(safety.get("temporary_suffix", ".__moving__"))
+    move_items = []
+    if partial_move and season_state.source_folder:
+        move_items = build_move_items(move_episodes, season_state.source_folder, destination, safety)
     return MovePlan(
         series_id=season_state.series_id,
         series_title=season_state.series_title,
@@ -865,22 +972,32 @@ def build_move_plan(
         temporary_destination_folder=temporary_destination,
         dry_run=dry_run,
         move_method=str(safety.get("move_method", "shutil.move")),
-        will_move=True,
-        will_unmonitor=True,
+        partial_move=partial_move,
+        will_move=bool(move_episodes),
+        will_unmonitor=bool(move_episodes),
         will_rescan=True,
+        unmonitor_episode_ids=[episode.episode_id for episode in move_episodes],
+        move_items=move_items,
         episode_count=len(season_state.episodes),
         relevant_episode_count=len(relevant_episodes),
-        episode_file_count=sum(1 for episode in relevant_episodes if episode.has_file),
+        episode_file_count=sum(1 for episode in move_episodes if episode.has_file),
     )
 
 
 def log_move_plan(plan: MovePlan) -> None:
     LOG.info("Move plan: %s", json.dumps(asdict(plan), ensure_ascii=False, sort_keys=True))
     action_prefix = "DRY RUN: would" if plan.dry_run else "EXECUTE: will"
-    LOG.info("%s move %s to %s", action_prefix, plan.source_folder, plan.destination_folder)
-    if plan.temporary_destination_folder:
-        LOG.info("%s use temporary destination %s", action_prefix, plan.temporary_destination_folder)
-    LOG.info("%s unmonitor season %s", action_prefix, plan.season_number)
+    if plan.partial_move:
+        LOG.info("%s partially move %s file(s) from %s to %s", action_prefix, len(plan.move_items), plan.source_folder, plan.destination_folder)
+        for item in plan.move_items:
+            LOG.info("%s move episode %s file %s to %s", action_prefix, item.episode_number, item.source_path, item.destination_path)
+            if item.temporary_destination_path:
+                LOG.info("%s use temporary file %s", action_prefix, item.temporary_destination_path)
+    else:
+        LOG.info("%s move %s to %s", action_prefix, plan.source_folder, plan.destination_folder)
+        if plan.temporary_destination_folder:
+            LOG.info("%s use temporary destination %s", action_prefix, plan.temporary_destination_folder)
+    LOG.info("%s unmonitor moved episodes for season %s: %s", action_prefix, plan.season_number, plan.unmonitor_episode_ids)
     LOG.info("%s rescan series %s", action_prefix, plan.series_id)
 
 
@@ -894,6 +1011,27 @@ def preflight_move_plan(plan: MovePlan, safety: dict[str, Any]) -> MovePreflight
         errors.append(f"source folder does not exist: {plan.source_folder}")
     elif not os.path.isdir(plan.source_folder):
         errors.append(f"source path is not a directory: {plan.source_folder}")
+
+    if plan.partial_move:
+        for item in plan.move_items:
+            if not os.path.exists(item.source_path):
+                errors.append(f"source file does not exist: {item.source_path}")
+            elif not os.path.isfile(item.source_path):
+                errors.append(f"source path is not a file: {item.source_path}")
+            if safety.get("fail_if_destination_exists", True) and os.path.exists(item.destination_path):
+                errors.append(f"destination file already exists: {item.destination_path}")
+            if item.temporary_destination_path and os.path.exists(item.temporary_destination_path):
+                errors.append(f"temporary destination file already exists: {item.temporary_destination_path}")
+            item_parent = os.path.dirname(item.destination_path)
+            if not item_parent:
+                errors.append(f"destination parent cannot be determined: {item.destination_path}")
+            elif os.path.exists(item_parent) and not os.path.isdir(item_parent):
+                errors.append(f"destination parent exists but is not a directory: {item_parent}")
+            elif not os.path.exists(item_parent):
+                warning = f"destination parent will be created: {item_parent}"
+                if warning not in warnings:
+                    warnings.append(warning)
+        return MovePreflightResult(errors, warnings)
 
     if safety.get("fail_if_destination_exists", True) and os.path.exists(plan.destination_folder):
         errors.append(f"destination already exists: {plan.destination_folder}")
@@ -958,6 +1096,25 @@ def move_season(source: str, destination: str, safety: dict[str, Any]) -> None:
         raise RuntimeError("Internal move verification failed")
     if temporary_destination != destination:
         os.rename(temporary_destination, destination)
+
+
+def move_episode_files(move_items: list[MoveItem], safety: dict[str, Any]) -> None:
+    for item in move_items:
+        destination_parent = os.path.dirname(item.destination_path)
+        os.makedirs(destination_parent, exist_ok=True)
+        if safety.get("fail_if_destination_exists", True) and os.path.exists(item.destination_path):
+            raise FileExistsError(f"Destination already exists: {item.destination_path}")
+        if item.temporary_destination_path and os.path.exists(item.temporary_destination_path):
+            raise FileExistsError(f"Temporary destination already exists: {item.temporary_destination_path}")
+
+        source_size = os.path.getsize(item.source_path)
+        move_destination = item.temporary_destination_path or item.destination_path
+        shutil.move(item.source_path, move_destination)
+        destination_size = os.path.getsize(move_destination)
+        if source_size != destination_size:
+            raise RuntimeError(f"Internal move verification failed for {item.source_path}")
+        if move_destination != item.destination_path:
+            os.rename(move_destination, item.destination_path)
 
 
 def log_evaluation(result: EvaluationResult) -> None:
@@ -1089,12 +1246,24 @@ def main() -> int:
 
     result = evaluate_season_final(season_state, rules, safety, config, args.enable_local_mounts)
     log_evaluation(result)
-    if not result.is_final:
-        LOG.info("Season is not final yet. Nothing to do.")
-        return 0
     if not season_state.source_folder:
         LOG.error("Cannot determine source season folder")
         return 2
+    if not result.is_final:
+        missing_episodes = missing_required_episodes(season_state, rules)
+        if missing_episodes:
+            LOG.info(
+                "Season has monitored/relevant missing episodes. Treating as in-progress and not moving anything: %s",
+                [episode.episode_number for episode in missing_episodes],
+            )
+            return 0
+        if is_physical_season_folder(season_state.source_folder):
+            LOG.info("Season folder is not fully final yet. Nothing to do.")
+            return 0
+        if not movable_final_episodes(season_state, rules):
+            LOG.info("Loose season folder has no final movable episodes yet. Nothing to do.")
+            return 0
+        LOG.info("Loose season folder is partially final. Planning move for final episode files only.")
 
     destination = determine_destination(season_state.source_folder, mapping)
     move_plan = build_move_plan(season_state, mapping, destination, result, rules, safety, dry_run)
@@ -1112,8 +1281,11 @@ def main() -> int:
         LOG.error("Move preflight failed. Not moving and not unmonitoring.")
         return 1
 
-    move_season(season_state.source_folder, destination, safety)
-    client.unmonitor_season(season_state.series_id, season_state.season_number)
+    if move_plan.partial_move:
+        move_episode_files(move_plan.move_items, safety)
+    else:
+        move_season(season_state.source_folder, destination, safety)
+    client.unmonitor_episodes(move_plan.unmonitor_episode_ids)
     client.rescan_series(season_state.series_id)
     LOG.info("Done")
     return 0

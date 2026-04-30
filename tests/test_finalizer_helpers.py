@@ -20,6 +20,116 @@ class FinalizerHelperTests(unittest.TestCase):
         self.assertEqual(finalizer.infer_season_from_path("/tv-en/Test/Test.S09E05.mkv"), 9)
         self.assertIsNone(finalizer.infer_season_from_path("/tv-en/Test/movie.mkv"))
 
+    def test_build_event_context_prefers_file_path_season_over_sonarr_metadata(self) -> None:
+        context = finalizer.build_event_context(
+            {
+                "sonarr_eventtype": "Download",
+                "sonarr_series_id": "252",
+                "sonarr_episodefile_seasonnumber": "1",
+                "sonarr_episodefile_path": "/anime-jp/Bookworm/Season 04/Bookworm S04E01.mkv",
+            }
+        )
+
+        self.assertEqual(context.season_number, 4)
+
+    def test_resolve_missing_event_context_prefers_episode_file_path_season(self) -> None:
+        context = finalizer.EventContext(
+            event_type="Download",
+            series_id=252,
+            series_title=None,
+            series_path=None,
+            season_number=None,
+            imported_file_path=None,
+            episode_file_id=5650,
+        )
+
+        resolved = finalizer.resolve_missing_event_context(
+            context,
+            [
+                {
+                    "id": 5650,
+                    "seasonNumber": 1,
+                    "path": "/anime-jp/Bookworm/Season 04/Bookworm S04E01.mkv",
+                }
+            ],
+        )
+
+        self.assertEqual(resolved.season_number, 4)
+        self.assertEqual(resolved.imported_file_path, "/anime-jp/Bookworm/Season 04/Bookworm S04E01.mkv")
+
+    def test_build_season_state_uses_physical_folder_season_when_sonarr_season_is_wrong(self) -> None:
+        series = {"title": "Ascendance of a Bookworm"}
+        episodes = [
+            {"id": 1, "episodeNumber": 1, "seasonNumber": 1, "monitored": True, "hasFile": True, "episodeFileId": 101},
+            {"id": 2, "episodeNumber": 2, "seasonNumber": 1, "monitored": False, "hasFile": False, "episodeFileId": 0},
+            {"id": 37, "episodeNumber": 37, "seasonNumber": 1, "monitored": True, "hasFile": True, "episodeFileId": 137},
+            {"id": 38, "episodeNumber": 38, "seasonNumber": 1, "monitored": True, "hasFile": True, "episodeFileId": 138},
+            {"id": 41, "episodeNumber": 41, "seasonNumber": 1, "monitored": False, "hasFile": False, "episodeFileId": 0},
+        ]
+        episode_files = [
+            {"id": 101, "path": "/anime-jp/Bookworm/Season 01/Bookworm S01E01.mp4"},
+            {"id": 137, "path": "/anime-jp/Bookworm/Season 04/Bookworm S04E01.mkv"},
+            {"id": 138, "path": "/anime-jp/Bookworm/Season 04/Bookworm S04E02.mkv"},
+        ]
+        context = finalizer.EventContext(
+            event_type="Download",
+            series_id=252,
+            series_title=None,
+            series_path=None,
+            season_number=4,
+            imported_file_path=None,
+            episode_file_id=None,
+        )
+
+        season_state = finalizer.build_season_state(series, episodes, episode_files, context)
+
+        self.assertEqual(season_state.season_number, 4)
+        self.assertEqual(season_state.source_folder, "/anime-jp/Bookworm/Season 04")
+        self.assertEqual([episode.episode_number for episode in season_state.episodes], [37, 38])
+
+    def test_evaluate_season_final_can_merge_sonarr_languages_with_ffprobe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            media_path = Path(temp_dir) / "Bookworm S04E03.mkv"
+            media_path.write_text("media", encoding="utf-8")
+            season_state = finalizer.SeasonState(
+                series_id=252,
+                series_title="Ascendance of a Bookworm",
+                season_number=4,
+                source_folder=str(media_path.parent),
+                episodes=[
+                    finalizer.EpisodeState(
+                        episode_id=39,
+                        episode_number=39,
+                        monitored=True,
+                        has_file=True,
+                        episode_file_id=5648,
+                        path=str(media_path),
+                        sonarr_audio_languages=["en", "jp"],
+                        sonarr_subtitle_languages=["en"],
+                    )
+                ],
+            )
+            original_detect_file_languages = finalizer.detect_file_languages
+            finalizer.detect_file_languages = lambda _path: {"audio": ["jp"], "subtitles": []}
+            try:
+                result = finalizer.evaluate_season_final(
+                    season_state,
+                    {
+                        "allowed_final_audio_languages": ["en"],
+                        "evaluate_monitored_only": True,
+                        "require_all_episode_files": True,
+                        "allow_sonarr_language_fallback": True,
+                    },
+                    {"min_file_size_mb": 0},
+                    {},
+                )
+            finally:
+                finalizer.detect_file_languages = original_detect_file_languages
+
+        self.assertTrue(result.is_final)
+        self.assertEqual(season_state.episodes[0].audio_languages, ["en", "jp"])
+        self.assertEqual(season_state.episodes[0].language_detection_source, "ffprobe-sonarr-api-merged")
+
     def test_normalize_language_tag_exact_and_title_fallback(self) -> None:
         self.assertEqual(finalizer.normalize_language_tag("eng", exact_only=True), "en")
         self.assertEqual(finalizer.normalize_language_tag("English Dub", exact_only=False), "en")
@@ -38,6 +148,11 @@ class FinalizerHelperTests(unittest.TestCase):
             "target_prefix": "/anime-en",
         }
         self.assertEqual(finalizer.determine_destination("/anime-jp/Example/Season 02", mapping), "/anime-en/Example/Season 02")
+
+    def test_is_physical_season_folder_only_matches_season_directory_name(self) -> None:
+        self.assertTrue(finalizer.is_physical_season_folder("/anime-jp/Example/Season 01"))
+        self.assertFalse(finalizer.is_physical_season_folder("/anime-jp/Example"))
+        self.assertFalse(finalizer.is_physical_season_folder("/anime-jp/Example/Loose S01E01 files"))
 
     def test_find_path_mapping_only_matches_maintenance_source(self) -> None:
         config = {
@@ -238,12 +353,113 @@ class FinalizerHelperTests(unittest.TestCase):
         self.assertEqual(plan.destination_folder, "/tv-cz/Example Show/Season 02")
         self.assertEqual(plan.temporary_destination_folder, "/tv-cz/Example Show/Season 02.__moving__")
         self.assertTrue(plan.dry_run)
+        self.assertFalse(plan.partial_move)
         self.assertTrue(plan.will_move)
         self.assertTrue(plan.will_unmonitor)
         self.assertTrue(plan.will_rescan)
+        self.assertEqual(plan.unmonitor_episode_ids, [1])
+        self.assertEqual(plan.move_items, [])
         self.assertEqual(plan.episode_count, 2)
         self.assertEqual(plan.relevant_episode_count, 1)
         self.assertEqual(plan.episode_file_count, 1)
+
+    def test_build_move_plan_can_partially_move_final_files_from_loose_folder(self) -> None:
+        season_state = finalizer.SeasonState(
+            series_id=253,
+            series_title="HELL MODE",
+            season_number=1,
+            source_folder="/anime-jp/HELL MODE",
+            episodes=[
+                finalizer.EpisodeState(
+                    episode_id=10,
+                    episode_number=1,
+                    monitored=True,
+                    has_file=True,
+                    episode_file_id=100,
+                    path="/anime-jp/HELL MODE/HELL MODE S01E01.mkv",
+                    is_final=True,
+                ),
+                finalizer.EpisodeState(
+                    episode_id=11,
+                    episode_number=2,
+                    monitored=True,
+                    has_file=True,
+                    episode_file_id=101,
+                    path="/anime-jp/HELL MODE/HELL MODE S01E02.mkv",
+                    is_final=False,
+                ),
+                finalizer.EpisodeState(
+                    episode_id=12,
+                    episode_number=3,
+                    monitored=True,
+                    has_file=True,
+                    episode_file_id=102,
+                    path="/anime-jp/HELL MODE/HELL MODE S01E03.mkv",
+                    is_final=False,
+                ),
+            ],
+        )
+
+        plan = finalizer.build_move_plan(
+            season_state,
+            {"name": "anime", "source_prefix": "/anime-jp", "target_prefix": "/anime-en"},
+            "/anime-en/HELL MODE",
+            finalizer.EvaluationResult(False, "en", "one or more episodes are not final", [season_state.episodes[1]]),
+            {"evaluate_monitored_only": True},
+            {"move_to_temporary_folder_first": True, "temporary_suffix": ".__moving__"},
+            dry_run=True,
+        )
+
+        self.assertTrue(plan.partial_move)
+        self.assertEqual(plan.unmonitor_episode_ids, [10])
+        self.assertEqual(plan.episode_count, 3)
+        self.assertEqual(plan.relevant_episode_count, 3)
+        self.assertEqual(plan.episode_file_count, 1)
+        self.assertEqual(len(plan.move_items), 1)
+        self.assertEqual(plan.move_items[0].source_path, "/anime-jp/HELL MODE/HELL MODE S01E01.mkv")
+        self.assertEqual(plan.move_items[0].destination_path, "/anime-en/HELL MODE/HELL MODE S01E01.mkv")
+        self.assertEqual(plan.move_items[0].temporary_destination_path, "/anime-en/HELL MODE/HELL MODE S01E01.mkv.__moving__")
+
+    def test_missing_required_episodes_detects_monitored_missing_files(self) -> None:
+        season_state = finalizer.SeasonState(
+            series_id=253,
+            series_title="HELL MODE",
+            season_number=1,
+            source_folder="/anime-jp/HELL MODE",
+            episodes=[
+                finalizer.EpisodeState(
+                    episode_id=10,
+                    episode_number=1,
+                    monitored=True,
+                    has_file=True,
+                    episode_file_id=100,
+                    path="/anime-jp/HELL MODE/HELL MODE S01E01.mkv",
+                    is_final=True,
+                ),
+                finalizer.EpisodeState(
+                    episode_id=11,
+                    episode_number=2,
+                    monitored=True,
+                    has_file=False,
+                    episode_file_id=None,
+                    path=None,
+                    is_final=False,
+                ),
+                finalizer.EpisodeState(
+                    episode_id=12,
+                    episode_number=3,
+                    monitored=False,
+                    has_file=False,
+                    episode_file_id=None,
+                    path=None,
+                    is_final=False,
+                ),
+            ],
+        )
+
+        missing = finalizer.missing_required_episodes(season_state, {"evaluate_monitored_only": True})
+
+        self.assertEqual([episode.episode_number for episode in missing], [2])
 
     def test_build_move_plan_can_disable_temporary_destination(self) -> None:
         season_state = finalizer.SeasonState(
@@ -265,6 +481,7 @@ class FinalizerHelperTests(unittest.TestCase):
 
         self.assertIsNone(plan.temporary_destination_folder)
         self.assertFalse(plan.dry_run)
+        self.assertFalse(plan.partial_move)
         self.assertEqual(plan.move_method, "shutil.move")
 
     def test_preflight_move_plan_accepts_ready_paths(self) -> None:
@@ -285,9 +502,12 @@ class FinalizerHelperTests(unittest.TestCase):
                 temporary_destination_folder=str(destination) + ".__moving__",
                 dry_run=False,
                 move_method="shutil.move",
+                partial_move=False,
                 will_move=True,
                 will_unmonitor=True,
                 will_rescan=True,
+                unmonitor_episode_ids=[1],
+                move_items=[],
                 episode_count=1,
                 relevant_episode_count=1,
                 episode_file_count=1,
@@ -314,9 +534,12 @@ class FinalizerHelperTests(unittest.TestCase):
                 temporary_destination_folder=str(destination) + ".__moving__",
                 dry_run=False,
                 move_method="shutil.move",
+                partial_move=False,
                 will_move=True,
                 will_unmonitor=True,
                 will_rescan=True,
+                unmonitor_episode_ids=[1],
+                move_items=[],
                 episode_count=1,
                 relevant_episode_count=1,
                 episode_file_count=1,
@@ -341,6 +564,30 @@ class FinalizerHelperTests(unittest.TestCase):
 
             self.assertTrue(source.exists())
             self.assertTrue(destination.exists())
+
+    def test_move_episode_files_moves_only_selected_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            destination = root / "destination"
+            source.mkdir()
+            final_file = source / "Episode 01.mkv"
+            blocked_file = source / "Episode 02.mkv"
+            final_file.write_text("english", encoding="utf-8")
+            blocked_file.write_text("japanese", encoding="utf-8")
+            item = finalizer.MoveItem(
+                episode_id=1,
+                episode_number=1,
+                source_path=str(final_file),
+                destination_path=str(destination / "Episode 01.mkv"),
+                temporary_destination_path=str(destination / "Episode 01.mkv") + ".__moving__",
+            )
+
+            finalizer.move_episode_files([item], {"fail_if_destination_exists": True})
+
+            self.assertFalse(final_file.exists())
+            self.assertTrue((destination / "Episode 01.mkv").exists())
+            self.assertTrue(blocked_file.exists())
 
 
 if __name__ == "__main__":
