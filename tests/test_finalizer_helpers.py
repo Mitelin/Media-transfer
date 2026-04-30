@@ -596,6 +596,30 @@ class FinalizerHelperTests(unittest.TestCase):
             self.assertTrue(destination.exists())
             self.assertTrue((destination / "Episode 01.mkv").exists())
 
+    def test_move_season_rolls_back_when_final_rename_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source" / "Season 01"
+            destination = root / "target" / "Example" / "Season 01"
+            source.mkdir(parents=True)
+            (source / "Episode 01.mkv").write_text("media", encoding="utf-8")
+            original_rename = finalizer.os.rename
+
+            def failing_rename(current_path: str, target_path: str) -> None:
+                raise OSError(f"simulated rename failure: {current_path} -> {target_path}")
+
+            finalizer.os.rename = failing_rename
+            try:
+                with self.assertRaisesRegex(OSError, "simulated rename failure"):
+                    finalizer.move_season(str(source), str(destination), {"fail_if_destination_exists": True})
+            finally:
+                finalizer.os.rename = original_rename
+
+            self.assertTrue(source.exists())
+            self.assertTrue((source / "Episode 01.mkv").exists())
+            self.assertFalse(destination.exists())
+            self.assertFalse(Path(str(destination) + ".__moving__").exists())
+
     def test_move_episode_files_moves_only_selected_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -619,6 +643,55 @@ class FinalizerHelperTests(unittest.TestCase):
             self.assertFalse(final_file.exists())
             self.assertTrue((destination / "Episode 01.mkv").exists())
             self.assertTrue(blocked_file.exists())
+
+    def test_move_episode_files_rolls_back_when_final_rename_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            destination = root / "destination"
+            source.mkdir()
+            first_file = source / "Episode 01.mkv"
+            second_file = source / "Episode 02.mkv"
+            first_file.write_text("english", encoding="utf-8")
+            second_file.write_text("english too", encoding="utf-8")
+            items = [
+                finalizer.MoveItem(
+                    episode_id=1,
+                    episode_number=1,
+                    source_path=str(first_file),
+                    destination_path=str(destination / "Episode 01.mkv"),
+                    temporary_destination_path=str(destination / "Episode 01.mkv") + ".__moving__",
+                ),
+                finalizer.MoveItem(
+                    episode_id=2,
+                    episode_number=2,
+                    source_path=str(second_file),
+                    destination_path=str(destination / "Episode 02.mkv"),
+                    temporary_destination_path=str(destination / "Episode 02.mkv") + ".__moving__",
+                ),
+            ]
+            original_rename = finalizer.os.rename
+            rename_calls = 0
+
+            def fail_second_rename(current_path: str, target_path: str) -> None:
+                nonlocal rename_calls
+                rename_calls += 1
+                if rename_calls == 2:
+                    raise OSError(f"simulated rename failure: {current_path} -> {target_path}")
+                original_rename(current_path, target_path)
+
+            finalizer.os.rename = fail_second_rename
+            try:
+                with self.assertRaisesRegex(OSError, "simulated rename failure"):
+                    finalizer.move_episode_files(items, {"fail_if_destination_exists": True})
+            finally:
+                finalizer.os.rename = original_rename
+
+            self.assertTrue(first_file.exists())
+            self.assertTrue(second_file.exists())
+            self.assertFalse((destination / "Episode 01.mkv").exists())
+            self.assertFalse((destination / "Episode 02.mkv").exists())
+            self.assertFalse(Path(str(destination / "Episode 02.mkv") + ".__moving__").exists())
 
     def test_partial_move_includes_matching_subtitle_sidecars(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

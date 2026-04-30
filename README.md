@@ -221,6 +221,8 @@ destination parent se případně vytvoří
 
 Pokud preflight najde chybu, script nepřesune soubory, neunmonitoruje epizody a nespustí rescan.
 
+Pokud selže skutečný přesun až po přesunutí do temporary cíle nebo před finálním rename, script se pokusí přesunuté soubory nebo složku vrátit zpět na původní místo. Sonarr unmonitoring a rescan se spustí až po úspěšném dokončení move kroku.
+
 ## 5. Sonarr Custom Script wrappery
 
 Pro nasazení jsou připravené dva wrappery:

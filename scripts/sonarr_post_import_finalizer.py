@@ -1109,6 +1109,24 @@ def collect_file_sizes(folder: str) -> dict[str, int]:
     return sizes
 
 
+def rollback_moved_path(current_path: str, original_path: str) -> None:
+    if not os.path.exists(current_path) or os.path.exists(original_path):
+        return
+    original_parent = os.path.dirname(original_path)
+    if original_parent:
+        os.makedirs(original_parent, exist_ok=True)
+    LOG.warning("Rolling back failed move: %s -> %s", current_path, original_path)
+    try:
+        shutil.move(current_path, original_path)
+    except Exception:
+        LOG.exception("Rollback failed for %s -> %s", current_path, original_path)
+
+
+def rollback_move_items(moved_items: list[tuple[MoveItem, str]]) -> None:
+    for item, current_path in reversed(moved_items):
+        rollback_moved_path(current_path, item.source_path)
+
+
 def move_season(source: str, destination: str, safety: dict[str, Any]) -> None:
     destination_parent = os.path.dirname(destination)
     os.makedirs(destination_parent, exist_ok=True)
@@ -1122,31 +1140,48 @@ def move_season(source: str, destination: str, safety: dict[str, Any]) -> None:
             raise FileExistsError(f"Temporary destination already exists: {temporary_destination}")
 
     source_sizes = collect_file_sizes(source)
-    shutil.move(source, temporary_destination)
-    destination_sizes = collect_file_sizes(temporary_destination)
-    if source_sizes != destination_sizes:
-        raise RuntimeError("Internal move verification failed")
-    if temporary_destination != destination:
-        os.rename(temporary_destination, destination)
+    moved_path = temporary_destination
+    try:
+        shutil.move(source, temporary_destination)
+        destination_sizes = collect_file_sizes(temporary_destination)
+        if source_sizes != destination_sizes:
+            raise RuntimeError("Internal move verification failed")
+        if temporary_destination != destination:
+            os.rename(temporary_destination, destination)
+            moved_path = destination
+    except Exception:
+        rollback_moved_path(moved_path, source)
+        raise
 
 
 def move_episode_files(move_items: list[MoveItem], safety: dict[str, Any]) -> None:
+    moved_items: list[tuple[MoveItem, str]] = []
     for item in move_items:
-        destination_parent = os.path.dirname(item.destination_path)
-        os.makedirs(destination_parent, exist_ok=True)
-        if safety.get("fail_if_destination_exists", True) and os.path.exists(item.destination_path):
-            raise FileExistsError(f"Destination already exists: {item.destination_path}")
-        if item.temporary_destination_path and os.path.exists(item.temporary_destination_path):
-            raise FileExistsError(f"Temporary destination already exists: {item.temporary_destination_path}")
+        moved_path: str | None = None
+        try:
+            destination_parent = os.path.dirname(item.destination_path)
+            os.makedirs(destination_parent, exist_ok=True)
+            if safety.get("fail_if_destination_exists", True) and os.path.exists(item.destination_path):
+                raise FileExistsError(f"Destination already exists: {item.destination_path}")
+            if item.temporary_destination_path and os.path.exists(item.temporary_destination_path):
+                raise FileExistsError(f"Temporary destination already exists: {item.temporary_destination_path}")
 
-        source_size = os.path.getsize(item.source_path)
-        move_destination = item.temporary_destination_path or item.destination_path
-        shutil.move(item.source_path, move_destination)
-        destination_size = os.path.getsize(move_destination)
-        if source_size != destination_size:
-            raise RuntimeError(f"Internal move verification failed for {item.source_path}")
-        if move_destination != item.destination_path:
-            os.rename(move_destination, item.destination_path)
+            source_size = os.path.getsize(item.source_path)
+            move_destination = item.temporary_destination_path or item.destination_path
+            moved_path = move_destination
+            shutil.move(item.source_path, move_destination)
+            destination_size = os.path.getsize(move_destination)
+            if source_size != destination_size:
+                raise RuntimeError(f"Internal move verification failed for {item.source_path}")
+            if move_destination != item.destination_path:
+                os.rename(move_destination, item.destination_path)
+                moved_path = item.destination_path
+            moved_items.append((item, moved_path))
+        except Exception:
+            if moved_path is not None:
+                rollback_moved_path(moved_path, item.source_path)
+            rollback_move_items(moved_items)
+            raise
 
 
 def log_evaluation(result: EvaluationResult) -> None:
