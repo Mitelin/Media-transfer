@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+logs/
+.env
+
+# Local secrets and private planning context
+CONTEXT/
+config/*
+!config/
+!config/sonarr-finalizer.example.yml

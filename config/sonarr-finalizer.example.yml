@@ -1,0 +1,72 @@
+# Copy to config/sonarr-finalizer.yml and fill local secrets/endpoints.
+# Keep config/sonarr-finalizer.yml untracked.
+
+active_instance: "anime"
+
+sonarr_instances:
+  tv:
+    url: "http://sonarr:8989"
+    lan_url: "http://192.168.0.10:8989"
+    tailscale_url: "http://100.x.y.z:8989"
+    api_key: ""
+    instance_type: "tv"
+    maintenance_roots:
+      staging_en: "/tv-en"
+
+  anime:
+    url: "http://sonarr-anime:8989"
+    lan_url: "http://192.168.0.10:8990"
+    tailscale_url: "http://100.x.y.z:8990"
+    api_key: ""
+    instance_type: "anime"
+    maintenance_roots:
+      staging_jp: "/anime-jp"
+
+paths:
+  local_mounts: []
+
+  mappings:
+    - name: "TV English maintenance to Czech target"
+      instance_type: "tv"
+      source_prefix: "/tv-en"
+      target_prefix: "/tv-cz"
+      final_language: "cz"
+
+    - name: "Anime Japanese maintenance to English target"
+      instance_type: "anime"
+      source_prefix: "/anime-jp"
+      target_prefix: "/anime-en"
+      final_language: "en"
+
+rules:
+  tv:
+    allowed_final_audio_languages:
+      - "cz"
+    require_all_episode_files: true
+    evaluate_monitored_only: true
+    allow_subtitle_as_final: false
+    allow_sonarr_language_fallback: true
+
+  anime:
+    allowed_final_audio_languages:
+      - "en"
+    require_all_episode_files: true
+    evaluate_monitored_only: true
+    allow_subtitle_as_final: false
+    allow_sonarr_language_fallback: true
+
+safety:
+  dry_run: true
+  allowed_event_types:
+    - "Download"
+    - "Import"
+    - "Upgrade"
+  skip_specials: true
+  min_file_size_mb: 50
+  fail_if_destination_exists: true
+  move_to_temporary_folder_first: true
+  temporary_suffix: ".__moving__"
+
+logging:
+  path: "logs/sonarr-finalizer.log"
+  level: "INFO"
