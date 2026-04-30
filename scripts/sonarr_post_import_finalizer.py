@@ -48,6 +48,16 @@ class EventContext:
 
 
 @dataclass
+class MovieEventContext:
+    event_type: str
+    movie_id: int | None
+    movie_title: str | None
+    movie_path: str | None
+    movie_file_id: int | None
+    movie_file_path: str | None
+
+
+@dataclass
 class EpisodeState:
     episode_id: int
     episode_number: int | None
@@ -82,6 +92,30 @@ class EvaluationResult:
 
 
 @dataclass
+class MovieState:
+    movie_id: int
+    title: str
+    movie_path: str | None
+    movie_file_id: int | None
+    file_path: str | None
+    audio_languages: list[str] = field(default_factory=list)
+    subtitle_languages: list[str] = field(default_factory=list)
+    radarr_audio_languages: list[str] = field(default_factory=list)
+    radarr_subtitle_languages: list[str] = field(default_factory=list)
+    language_detection_source: str | None = None
+    is_final: bool = False
+    block_reason: str | None = None
+
+
+@dataclass
+class MovieEvaluationResult:
+    is_final: bool
+    target_language: str | None
+    reason: str
+    blocking_reason: str | None
+
+
+@dataclass
 class MoveItem:
     episode_id: int
     episode_number: int | None
@@ -112,6 +146,23 @@ class MovePlan:
     episode_count: int
     relevant_episode_count: int
     episode_file_count: int
+
+
+@dataclass
+class MovieMovePlan:
+    movie_id: int
+    movie_title: str
+    mapping_name: str | None
+    target_language: str | None
+    source_path: str
+    destination_path: str
+    dry_run: bool
+    move_method: str
+    will_move: bool
+    will_unmonitor: bool
+    will_rescan: bool
+    move_items: list[MoveItem]
+    file_count: int
 
 
 @dataclass
@@ -182,6 +233,25 @@ class SonarrClient:
         self.post("/api/v3/command", {"name": "RescanSeries", "seriesId": series_id})
 
 
+class RadarrClient(SonarrClient):
+    def get_movie(self, movie_id: int) -> dict[str, Any]:
+        return self.get(f"/api/v3/movie/{movie_id}")
+
+    def get_all_movies(self) -> list[dict[str, Any]]:
+        return normalize_records(self.get("/api/v3/movie"))
+
+    def get_movie_file(self, movie_file_id: int) -> dict[str, Any]:
+        return self.get(f"/api/v3/moviefile/{movie_file_id}")
+
+    def unmonitor_movie(self, movie_id: int) -> None:
+        movie = self.get_movie(movie_id)
+        movie["monitored"] = False
+        self.put(f"/api/v3/movie/{movie_id}", movie)
+
+    def rescan_movie(self, movie_id: int) -> None:
+        self.post("/api/v3/command", {"name": "RescanMovie", "movieId": movie_id})
+
+
 def normalize_records(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return payload
@@ -230,19 +300,39 @@ def setup_logging(config: dict[str, Any], config_path: Path) -> None:
     LOG.info("Logging to %s", log_path)
 
 
+def configured_instances(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    instances: dict[str, dict[str, Any]] = {}
+    for group_name, app_name in (("sonarr_instances", "sonarr"), ("radarr_instances", "radarr")):
+        group = config.get(group_name) or {}
+        if not isinstance(group, dict):
+            continue
+        for instance_name, instance in group.items():
+            if not isinstance(instance, dict):
+                continue
+            merged = dict(instance)
+            merged["name"] = instance_name
+            merged["app"] = app_name
+            instances[str(instance_name)] = merged
+    return instances
+
+
 def get_active_sonarr_config(config: dict[str, Any], instance_override: str | None = None) -> dict[str, Any]:
+    return get_active_instance_config(config, instance_override)
+
+
+def get_active_instance_config(config: dict[str, Any], instance_override: str | None = None) -> dict[str, Any]:
     active_instance = instance_override or config.get("active_instance")
-    instances = config.get("sonarr_instances", {})
+    instances = configured_instances(config)
     if not active_instance:
         raise ValueError("Missing config key: active_instance")
     if active_instance not in instances:
-        raise ValueError(f"active_instance {active_instance!r} not found in sonarr_instances")
+        raise ValueError(f"active_instance {active_instance!r} not found in configured instances")
     instance = dict(instances[active_instance])
     instance["name"] = active_instance
     if not instance.get("url"):
-        raise ValueError(f"Sonarr instance {active_instance!r} missing url")
+        raise ValueError(f"{str(instance.get('app', 'arr')).title()} instance {active_instance!r} missing url")
     if not instance.get("api_key"):
-        raise ValueError(f"Sonarr instance {active_instance!r} missing api key")
+        raise ValueError(f"{str(instance.get('app', 'arr')).title()} instance {active_instance!r} missing api key")
     return instance
 
 
@@ -263,34 +353,51 @@ def validate_config(config: dict[str, Any]) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
 
-    instances = config.get("sonarr_instances")
-    if not isinstance(instances, dict) or not instances:
-        errors.append("sonarr_instances must be a non-empty mapping")
-        instances = {}
+    sonarr_instances = config.get("sonarr_instances") or {}
+    radarr_instances = config.get("radarr_instances") or {}
+    if not isinstance(sonarr_instances, dict):
+        errors.append("sonarr_instances must be a mapping")
+        sonarr_instances = {}
+    if not isinstance(radarr_instances, dict):
+        errors.append("radarr_instances must be a mapping")
+        radarr_instances = {}
+    if not sonarr_instances and not radarr_instances:
+        errors.append("at least one of sonarr_instances or radarr_instances must be a non-empty mapping")
+
+    instances = configured_instances(config)
 
     active_instance = config.get("active_instance")
     if active_instance and active_instance not in instances:
-        errors.append(f"active_instance {active_instance!r} is not defined in sonarr_instances")
+        errors.append(f"active_instance {active_instance!r} is not defined in configured instances")
 
     instance_types: set[str] = set()
+    raw_instance_groups = (("sonarr_instances", sonarr_instances), ("radarr_instances", radarr_instances))
+    for group_name, group_instances in raw_instance_groups:
+        for instance_name, instance in group_instances.items():
+            if not isinstance(instance, dict):
+                errors.append(f"{group_name}.{instance_name} must be a mapping")
+                continue
+            instance_type = str(instance.get("instance_type") or "")
+            if not instance_type:
+                errors.append(f"{group_name}.{instance_name}.instance_type is required")
+            else:
+                instance_types.add(instance_type)
+            for key in ("url", "lan_url", "tailscale_url"):
+                if not instance.get(key):
+                    warnings.append(f"{group_name}.{instance_name}.{key} is empty")
+            api_key = str(instance.get("api_key") or "")
+            if not api_key:
+                warnings.append(f"{group_name}.{instance_name}.api_key missing api key; fill it in local config before runtime")
+            roots = instance.get("maintenance_roots") or {}
+            if not isinstance(roots, dict) or not roots:
+                warnings.append(f"{group_name}.{instance_name}.maintenance_roots is empty")
+
     for instance_name, instance in instances.items():
         if not isinstance(instance, dict):
-            errors.append(f"sonarr_instances.{instance_name} must be a mapping")
             continue
         instance_type = str(instance.get("instance_type") or "")
-        if not instance_type:
-            errors.append(f"sonarr_instances.{instance_name}.instance_type is required")
-        else:
+        if instance_type:
             instance_types.add(instance_type)
-        for key in ("url", "lan_url", "tailscale_url"):
-            if not instance.get(key):
-                warnings.append(f"sonarr_instances.{instance_name}.{key} is empty")
-        api_key = str(instance.get("api_key") or "")
-        if not api_key:
-            warnings.append(f"sonarr_instances.{instance_name}.api_key missing api key; fill it in local config before runtime")
-        roots = instance.get("maintenance_roots") or {}
-        if not isinstance(roots, dict) or not roots:
-            warnings.append(f"sonarr_instances.{instance_name}.maintenance_roots is empty")
 
     rules_by_type = config.get("rules")
     if not isinstance(rules_by_type, dict) or not rules_by_type:
@@ -321,7 +428,7 @@ def validate_config(config: dict[str, Any]) -> tuple[list[str], list[str]]:
         if not instance_type:
             errors.append(f"{label}.instance_type is required")
         elif instance_type not in instance_types:
-            errors.append(f"{label}.instance_type {instance_type!r} has no matching Sonarr instance")
+            errors.append(f"{label}.instance_type {instance_type!r} has no matching configured instance")
         if not source_prefix:
             errors.append(f"{label}.source_prefix is required")
         if not target_prefix:
@@ -370,6 +477,10 @@ def maintenance_roots_for_instance_type(instances: dict[str, Any], instance_type
         if isinstance(maintenance_roots, dict):
             roots.update(str(value) for value in maintenance_roots.values() if value)
     return roots
+
+
+def app_label(instance: dict[str, Any]) -> str:
+    return str(instance.get("app") or "sonarr").title()
 
 
 def validate_config_command(config: dict[str, Any]) -> int:
@@ -428,8 +539,56 @@ def list_sonarr_series(client: SonarrClient, text_filter: str | None, root_prefi
     return 0
 
 
+def test_radarr_api(client: RadarrClient, instance: dict[str, Any], base_url: str) -> int:
+    status = client.get_system_status()
+    LOG.info(
+        "Radarr API OK: instance=%s url=%s app=%s version=%s",
+        instance.get("name"),
+        base_url,
+        status.get("appName", "Radarr"),
+        status.get("version", "unknown"),
+    )
+    root_folders = client.get_root_folders()
+    configured_roots = set((instance.get("maintenance_roots") or instance.get("root_folders") or {}).values())
+    found_roots = {folder.get("path") for folder in root_folders}
+    LOG.info("Radarr root folders: %s", sorted(found_roots))
+    for root in sorted(configured_roots):
+        if root in found_roots:
+            LOG.info("Configured root folder found: %s", root)
+        else:
+            LOG.warning("Configured root folder not returned by Radarr API: %s", root)
+    return 0
+
+
+def list_radarr_movies(client: RadarrClient, text_filter: str | None, root_prefix: str | None, limit: int) -> int:
+    movie_items = client.get_all_movies()
+    if text_filter:
+        needle = text_filter.lower()
+        movie_items = [item for item in movie_items if needle in str(item.get("title", "")).lower()]
+    if root_prefix:
+        movie_items = [item for item in movie_items if path_starts_with(str(item.get("path", "")), root_prefix)]
+    movie_items = sorted(movie_items, key=lambda item: str(item.get("title", "")).lower())
+    for item in movie_items[:limit]:
+        LOG.info(
+            "Movie id=%s title=%s path=%s monitored=%s",
+            item.get("id"),
+            item.get("title"),
+            item.get("path"),
+            item.get("monitored"),
+        )
+    LOG.info("Listed %s of %s matching movies", min(len(movie_items), limit), len(movie_items))
+    return 0
+
+
 def read_sonarr_env() -> dict[str, str]:
     values = {key: value for key, value in os.environ.items() if key.lower().startswith("sonarr_")}
+    for key in sorted(values):
+        LOG.info("ENV %s=%s", key, values[key])
+    return values
+
+
+def read_radarr_env() -> dict[str, str]:
+    values = {key: value for key, value in os.environ.items() if key.lower().startswith("radarr_")}
     for key in sorted(values):
         LOG.info("ENV %s=%s", key, values[key])
     return values
@@ -472,6 +631,17 @@ def build_event_context(env: dict[str, str]) -> EventContext:
     )
 
 
+def build_movie_event_context(env: dict[str, str]) -> MovieEventContext:
+    return MovieEventContext(
+        event_type=env.get("radarr_eventtype", ""),
+        movie_id=parse_int(env.get("radarr_movie_id")),
+        movie_title=env.get("radarr_movie_title"),
+        movie_path=env.get("radarr_movie_path"),
+        movie_file_id=parse_int(env.get("radarr_moviefile_id")),
+        movie_file_path=env.get("radarr_moviefile_path") or env.get("radarr_moviefile_relativepath"),
+    )
+
+
 def apply_manual_event_overrides(context: EventContext, args: argparse.Namespace) -> EventContext:
     if args.series_id is not None:
         context.series_id = args.series_id
@@ -486,6 +656,20 @@ def apply_manual_event_overrides(context: EventContext, args: argparse.Namespace
         context.event_type = args.event_type
     elif context.series_id is not None and context.season_number is not None and not context.event_type:
         context.event_type = "Download"
+    return context
+
+
+def apply_manual_movie_event_overrides(context: MovieEventContext, args: argparse.Namespace) -> MovieEventContext:
+    if args.movie_id is not None:
+        context.movie_id = args.movie_id
+    if args.movie_file_id is not None:
+        context.movie_file_id = args.movie_file_id
+    if args.movie_file_path:
+        context.movie_file_path = args.movie_file_path
+    if args.event_type:
+        context.event_type = args.event_type
+    elif context.movie_id is not None and not context.event_type:
+        context.event_type = "Manual"
     return context
 
 
@@ -565,6 +749,10 @@ def detect_sonarr_file_languages(episode_file: dict[str, Any] | None) -> dict[st
     audio.update(normalize_language_values([media_audio], exact_only=True))
     subtitles = normalize_language_values([media_subtitles], exact_only=True)
     return {"audio": sorted(audio), "subtitles": subtitles}
+
+
+def detect_arr_file_languages(media_file: dict[str, Any] | None) -> dict[str, list[str]]:
+    return detect_sonarr_file_languages(media_file)
 
 
 def detect_file_languages(path: str) -> dict[str, list[str]]:
@@ -855,6 +1043,183 @@ def evaluate_season_final(
     if blocking:
         return EvaluationResult(False, target_language, "one or more episodes are not final", blocking)
     return EvaluationResult(True, target_language, "all relevant episodes are final", [])
+
+
+def build_movie_state(movie: dict[str, Any], movie_file: dict[str, Any] | None, context: MovieEventContext) -> MovieState:
+    file_path = context.movie_file_path
+    if not file_path and movie_file:
+        file_path = movie_file.get("path") or movie_file.get("relativePath")
+    movie_path = context.movie_path or movie.get("path")
+    languages = detect_arr_file_languages(movie_file)
+    return MovieState(
+        movie_id=int(movie.get("id") or context.movie_id or 0),
+        title=str(movie.get("title") or context.movie_title or "unknown"),
+        movie_path=movie_path,
+        movie_file_id=context.movie_file_id or parse_int(movie_file.get("id") if movie_file else None),
+        file_path=file_path,
+        radarr_audio_languages=languages["audio"],
+        radarr_subtitle_languages=languages["subtitles"],
+    )
+
+
+def evaluate_movie_final(
+    movie_state: MovieState,
+    rules: dict[str, Any],
+    safety: dict[str, Any],
+    config: dict[str, Any],
+    enable_local_mounts: bool = False,
+) -> MovieEvaluationResult:
+    allowed_audio = set(rules.get("allowed_final_audio_languages") or [])
+    allow_subtitles = bool(rules.get("allow_subtitle_as_final", False))
+    allow_radarr_fallback = bool(rules.get("allow_radarr_language_fallback", rules.get("allow_sonarr_language_fallback", True)))
+    min_file_size_mb = float(safety.get("min_file_size_mb", 0) or 0)
+    target_language = sorted(allowed_audio)[0] if allowed_audio else None
+
+    if not movie_state.file_path:
+        movie_state.block_reason = "missing movie file path"
+        return MovieEvaluationResult(False, target_language, "movie file path missing", movie_state.block_reason)
+
+    local_read_path = translate_media_path_for_local_read(movie_state.file_path, config, enable_local_mounts)
+    if local_read_path != movie_state.file_path:
+        LOG.info("Translated movie path for local read: %s -> %s", movie_state.file_path, local_read_path)
+
+    if not os.path.exists(local_read_path):
+        if allow_radarr_fallback and (movie_state.radarr_audio_languages or movie_state.radarr_subtitle_languages):
+            movie_state.audio_languages = movie_state.radarr_audio_languages
+            movie_state.subtitle_languages = movie_state.radarr_subtitle_languages
+            movie_state.language_detection_source = "radarr-api-fallback"
+            LOG.info(
+                "Movie file unavailable locally; using Radarr language fallback audio=%s subtitles=%s",
+                movie_state.audio_languages,
+                movie_state.subtitle_languages,
+            )
+        else:
+            movie_state.block_reason = "file does not exist on disk"
+            return MovieEvaluationResult(False, target_language, "movie file unavailable", movie_state.block_reason)
+    else:
+        size_mb = os.path.getsize(local_read_path) / 1024 / 1024
+        if min_file_size_mb and size_mb < min_file_size_mb:
+            movie_state.block_reason = f"file smaller than minimum size {min_file_size_mb:g} MB"
+            return MovieEvaluationResult(False, target_language, "movie file too small", movie_state.block_reason)
+
+        detected_languages = detect_file_languages(local_read_path)
+        movie_state.audio_languages = detected_languages["audio"]
+        movie_state.subtitle_languages = detected_languages["subtitles"]
+        movie_state.language_detection_source = "ffprobe"
+        if allow_radarr_fallback and not movie_state.audio_languages and not movie_state.subtitle_languages and (
+            movie_state.radarr_audio_languages or movie_state.radarr_subtitle_languages
+        ):
+            movie_state.audio_languages = movie_state.radarr_audio_languages
+            movie_state.subtitle_languages = movie_state.radarr_subtitle_languages
+            movie_state.language_detection_source = "ffprobe-empty-radarr-api-fallback"
+        elif allow_radarr_fallback and (movie_state.radarr_audio_languages or movie_state.radarr_subtitle_languages):
+            movie_state.audio_languages = sorted(set(movie_state.audio_languages).union(movie_state.radarr_audio_languages))
+            movie_state.subtitle_languages = sorted(set(movie_state.subtitle_languages).union(movie_state.radarr_subtitle_languages))
+            movie_state.language_detection_source = "ffprobe-radarr-api-merged"
+
+    final_by_audio = bool(allowed_audio.intersection(movie_state.audio_languages))
+    final_by_subtitle = allow_subtitles and bool(allowed_audio.intersection(movie_state.subtitle_languages))
+    movie_state.is_final = final_by_audio or final_by_subtitle
+    LOG.info(
+        "Movie file=%s source=%s audio=%s subtitles=%s final=%s",
+        movie_state.file_path,
+        movie_state.language_detection_source,
+        movie_state.audio_languages,
+        movie_state.subtitle_languages,
+        movie_state.is_final,
+    )
+    if not movie_state.is_final:
+        movie_state.block_reason = "final language not detected"
+        return MovieEvaluationResult(False, target_language, "movie is not final", movie_state.block_reason)
+    return MovieEvaluationResult(True, target_language, "movie is final", None)
+
+
+def build_movie_move_plan(
+    movie_state: MovieState,
+    mapping: dict[str, Any],
+    result: MovieEvaluationResult,
+    safety: dict[str, Any],
+    dry_run: bool,
+) -> MovieMovePlan:
+    if not movie_state.file_path:
+        raise ValueError("movie file path is required")
+    source_path = movie_state.file_path
+    destination_path = determine_destination(source_path, mapping)
+    use_temporary = bool(safety.get("move_to_temporary_folder_first", True))
+    temporary_suffix = str(safety.get("temporary_suffix", ".__moving__"))
+    source_paths = [source_path, *find_subtitle_sidecars(source_path)]
+    move_items = []
+    for item_source_path in source_paths:
+        item_destination_path = determine_destination(item_source_path, mapping)
+        move_items.append(
+            MoveItem(
+                episode_id=movie_state.movie_id,
+                episode_number=None,
+                source_path=item_source_path,
+                destination_path=item_destination_path,
+                temporary_destination_path=item_destination_path + temporary_suffix if use_temporary else None,
+            )
+        )
+    return MovieMovePlan(
+        movie_id=movie_state.movie_id,
+        movie_title=movie_state.title,
+        mapping_name=mapping.get("name"),
+        target_language=result.target_language,
+        source_path=source_path,
+        destination_path=destination_path,
+        dry_run=dry_run,
+        move_method=str(safety.get("move_method", "shutil.move")),
+        will_move=result.is_final,
+        will_unmonitor=result.is_final,
+        will_rescan=result.is_final,
+        move_items=move_items,
+        file_count=len(move_items),
+    )
+
+
+def log_movie_move_plan(plan: MovieMovePlan) -> None:
+    LOG.info("Movie move plan: %s", json.dumps(asdict(plan), ensure_ascii=False, sort_keys=True))
+    action_prefix = "DRY RUN: would" if plan.dry_run else "EXECUTE: will"
+    for item in plan.move_items:
+        LOG.info("%s move movie file %s to %s", action_prefix, item.source_path, item.destination_path)
+        if item.temporary_destination_path:
+            LOG.info("%s use temporary file %s", action_prefix, item.temporary_destination_path)
+    LOG.info("%s unmonitor Radarr movie %s", action_prefix, plan.movie_id)
+    LOG.info("%s rescan Radarr movie %s", action_prefix, plan.movie_id)
+
+
+def preflight_movie_move_plan(plan: MovieMovePlan, safety: dict[str, Any]) -> MovePreflightResult:
+    return preflight_move_plan(
+        MovePlan(
+            series_id=plan.movie_id,
+            series_title=plan.movie_title,
+            season_number=0,
+            mapping_name=plan.mapping_name,
+            target_language=plan.target_language,
+            source_folder=os.path.dirname(plan.source_path),
+            destination_folder=os.path.dirname(plan.destination_path),
+            temporary_destination_folder=None,
+            dry_run=plan.dry_run,
+            move_method=plan.move_method,
+            partial_move=True,
+            will_move=plan.will_move,
+            will_unmonitor=plan.will_unmonitor,
+            will_rescan=plan.will_rescan,
+            unmonitor_season_number=None,
+            unmonitor_episode_ids=[plan.movie_id],
+            move_items=plan.move_items,
+            episode_count=1,
+            relevant_episode_count=1,
+            episode_file_count=plan.file_count,
+        ),
+        safety,
+    )
+
+
+def complete_radarr_movie_move(client: RadarrClient, plan: MovieMovePlan, safety: dict[str, Any]) -> None:
+    move_episode_files(plan.move_items, safety)
+    client.unmonitor_movie(plan.movie_id)
+    client.rescan_movie(plan.movie_id)
 
 
 def find_path_mapping(config: dict[str, Any], instance_type: str, source_folder: str, target_language: str | None) -> dict[str, Any] | None:
@@ -1197,21 +1562,103 @@ def log_evaluation(result: EvaluationResult) -> None:
         )
 
 
+def run_radarr_flow(
+    client: RadarrClient,
+    config: dict[str, Any],
+    instance_config: dict[str, Any],
+    safety: dict[str, Any],
+    dry_run: bool,
+    args: argparse.Namespace,
+) -> int:
+    env = read_radarr_env()
+    context = build_movie_event_context(env)
+    context = apply_manual_movie_event_overrides(context, args)
+    LOG.info("Movie event context: %s", context)
+
+    allowed_event_types = set(safety.get("allowed_event_types") or ["Download", "Import", "Upgrade", "Manual"])
+    if context.event_type not in allowed_event_types:
+        LOG.info("Ignoring event type %r", context.event_type)
+        return 0
+    if context.movie_id is None:
+        LOG.error("Missing radarr_movie_id")
+        return 2
+
+    movie = client.get_movie(context.movie_id)
+    movie_file = movie.get("movieFile") if isinstance(movie.get("movieFile"), dict) else None
+    if context.movie_file_id is not None:
+        movie_file = client.get_movie_file(context.movie_file_id)
+    elif movie_file and context.movie_file_id is None:
+        context.movie_file_id = parse_int(movie_file.get("id"))
+
+    rules_by_type = config.get("rules", {})
+    instance_type = str(instance_config.get("instance_type"))
+    rules = rules_by_type.get(instance_type, {})
+    movie_state = build_movie_state(movie, movie_file, context)
+    LOG.info(
+        "Movie state: title=%s movie_id=%s source=%s movie_file_id=%s",
+        movie_state.title,
+        movie_state.movie_id,
+        movie_state.file_path,
+        movie_state.movie_file_id,
+    )
+
+    target_language = target_language_from_rules(rules)
+    mapping = find_path_mapping(config, instance_type, movie_state.file_path or "", target_language)
+    if not mapping:
+        LOG.info(
+            "Movie source is not a configured maintenance source for target_language=%s. Skipping before language evaluation: %s",
+            target_language,
+            movie_state.file_path,
+        )
+        return 0
+
+    result = evaluate_movie_final(movie_state, rules, safety, config, args.enable_local_mounts)
+    LOG.info("Movie evaluation result: final=%s reason=%s target_language=%s", result.is_final, result.reason, result.target_language)
+    if result.blocking_reason:
+        LOG.info("Movie blocking reason: %s", result.blocking_reason)
+    if not result.is_final:
+        LOG.info("Movie is not final yet. Nothing to do.")
+        return 0
+
+    move_plan = build_movie_move_plan(movie_state, mapping, result, safety, dry_run)
+    LOG.info("Selected mapping: %s", mapping.get("name"))
+    LOG.info("Source file: %s", move_plan.source_path)
+    LOG.info("Destination file: %s", move_plan.destination_path)
+    log_movie_move_plan(move_plan)
+
+    if dry_run:
+        return 0
+
+    preflight = preflight_movie_move_plan(move_plan, safety)
+    log_move_preflight(preflight)
+    if preflight.errors:
+        LOG.error("Move preflight failed. Not moving and not unmonitoring.")
+        return 1
+
+    complete_radarr_movie_move(client, move_plan, safety)
+    LOG.info("Done")
+    return 0
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Sonarr post-import media finalizer")
+    parser = argparse.ArgumentParser(description="Sonarr/Radarr post-import media finalizer")
     parser.add_argument("--config", type=Path, default=Path(os.environ.get("MEDIA_FINALIZER_CONFIG", default_config_path())))
-    parser.add_argument("--instance", choices=["tv", "anime"], help="Override active_instance from config")
+    parser.add_argument("--instance", help="Override active_instance from config")
     parser.add_argument("--url-mode", choices=["docker", "lan", "tailscale"], default="docker")
-    parser.add_argument("--validate-config", action="store_true", help="Validate config structure without calling Sonarr or touching media files")
-    parser.add_argument("--test-api", action="store_true", help="Only test Sonarr API connectivity and root folders")
+    parser.add_argument("--validate-config", action="store_true", help="Validate config structure without calling Sonarr/Radarr or touching media files")
+    parser.add_argument("--test-api", action="store_true", help="Only test Sonarr/Radarr API connectivity and root folders")
     parser.add_argument("--list-series", action="store_true", help="List Sonarr series IDs and monitored seasons")
+    parser.add_argument("--list-movies", action="store_true", help="List Radarr movie IDs")
     parser.add_argument("--filter", help="Filter --list-series by title text")
-    parser.add_argument("--root-prefix", help="Filter --list-series by Sonarr root path prefix, e.g. /tv-en")
-    parser.add_argument("--limit", type=int, default=30, help="Maximum rows for --list-series")
+    parser.add_argument("--root-prefix", help="Filter --list-series/--list-movies by root path prefix, e.g. /tv-en")
+    parser.add_argument("--limit", type=int, default=30, help="Maximum rows for --list-series/--list-movies")
     parser.add_argument("--series-id", type=int, help="Manually provide Sonarr series ID for dry-run testing")
     parser.add_argument("--season-number", type=int, help="Manually provide Sonarr season number for dry-run testing")
     parser.add_argument("--imported-file-path", help="Manually provide imported episode path for dry-run testing")
-    parser.add_argument("--event-type", help="Manually provide Sonarr event type for dry-run testing")
+    parser.add_argument("--movie-id", type=int, help="Manually provide Radarr movie ID for dry-run testing")
+    parser.add_argument("--movie-file-id", type=int, help="Manually provide Radarr movie file ID for dry-run testing")
+    parser.add_argument("--movie-file-path", help="Manually provide imported Radarr movie file path for dry-run testing")
+    parser.add_argument("--event-type", help="Manually provide Sonarr/Radarr event type for dry-run testing")
     parser.add_argument("--inspect-season", action="store_true", help="Load and log season state without ffprobe or move evaluation")
     parser.add_argument(
         "--enable-local-mounts",
@@ -1234,8 +1681,8 @@ def main() -> int:
     if args.validate_config:
         return validate_config_command(config)
 
-    sonarr_config = get_active_sonarr_config(config, args.instance)
-    sonarr_base_url = get_sonarr_base_url(sonarr_config, args.url_mode)
+    instance_config = get_active_instance_config(config, args.instance)
+    base_url = get_sonarr_base_url(instance_config, args.url_mode)
     safety = config.get("safety", {})
     dry_run = bool(safety.get("dry_run", True)) or args.dry_run
     if args.execute and not safety.get("dry_run", True):
@@ -1244,20 +1691,35 @@ def main() -> int:
         LOG.error("Refusing non-dry-run execution with url_mode=%s. Use --url-mode docker or --allow-non-docker-execute.", args.url_mode)
         return 2
     LOG.info(
-        "Active Sonarr instance: %s type=%s url_mode=%s url=%s",
-        sonarr_config["name"],
-        sonarr_config.get("instance_type"),
+        "Active %s instance: %s type=%s url_mode=%s url=%s",
+        app_label(instance_config),
+        instance_config["name"],
+        instance_config.get("instance_type"),
         args.url_mode,
-        sonarr_base_url,
+        base_url,
     )
     LOG.info("Dry run: %s", dry_run)
     LOG.info("Local mount translation: %s", args.enable_local_mounts)
 
-    client = SonarrClient(sonarr_base_url, str(sonarr_config["api_key"]))
+    if instance_config.get("app") == "radarr":
+        client = RadarrClient(base_url, str(instance_config["api_key"]))
+        if args.test_api:
+            return test_radarr_api(client, instance_config, base_url)
+        if args.list_movies:
+            return list_radarr_movies(client, args.filter, args.root_prefix, args.limit)
+        if args.list_series:
+            LOG.error("--list-series is only valid for Sonarr instances; use --list-movies for Radarr")
+            return 2
+        return run_radarr_flow(client, config, instance_config, safety, dry_run, args)
+
+    client = SonarrClient(base_url, str(instance_config["api_key"]))
     if args.test_api:
-        return test_sonarr_api(client, sonarr_config, sonarr_base_url)
+        return test_sonarr_api(client, instance_config, base_url)
     if args.list_series:
         return list_sonarr_series(client, args.filter, args.root_prefix, args.limit)
+    if args.list_movies:
+        LOG.error("--list-movies is only valid for Radarr instances; use --list-series for Sonarr")
+        return 2
 
     env = read_sonarr_env()
     context = build_event_context(env)
@@ -1285,7 +1747,7 @@ def main() -> int:
         return 0
 
     rules_by_type = config.get("rules", {})
-    instance_type = str(sonarr_config.get("instance_type"))
+    instance_type = str(instance_config.get("instance_type"))
     rules = rules_by_type.get(instance_type, {})
     season_state = build_season_state(series, episodes, episode_files, context)
     LOG.info(

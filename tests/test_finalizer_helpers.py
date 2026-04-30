@@ -32,6 +32,23 @@ class FinalizerHelperTests(unittest.TestCase):
 
         self.assertEqual(context.season_number, 4)
 
+    def test_build_movie_event_context_reads_radarr_event(self) -> None:
+        context = finalizer.build_movie_event_context(
+            {
+                "radarr_eventtype": "Download",
+                "radarr_movie_id": "77",
+                "radarr_movie_title": "Example Movie",
+                "radarr_movie_path": "/movies-en/Example Movie (2026)",
+                "radarr_moviefile_id": "700",
+                "radarr_moviefile_path": "/movies-en/Example Movie (2026)/Example Movie.mkv",
+            }
+        )
+
+        self.assertEqual(context.event_type, "Download")
+        self.assertEqual(context.movie_id, 77)
+        self.assertEqual(context.movie_file_id, 700)
+        self.assertEqual(context.movie_file_path, "/movies-en/Example Movie (2026)/Example Movie.mkv")
+
     def test_resolve_missing_event_context_prefers_episode_file_path_season(self) -> None:
         context = finalizer.EventContext(
             event_type="Download",
@@ -129,6 +146,27 @@ class FinalizerHelperTests(unittest.TestCase):
         self.assertTrue(result.is_final)
         self.assertEqual(season_state.episodes[0].audio_languages, ["en", "jp"])
         self.assertEqual(season_state.episodes[0].language_detection_source, "ffprobe-sonarr-api-merged")
+
+    def test_evaluate_movie_final_uses_radarr_language_fallback(self) -> None:
+        movie_state = finalizer.MovieState(
+            movie_id=77,
+            title="Example Movie",
+            movie_path="/movies-en/Example Movie (2026)",
+            movie_file_id=700,
+            file_path="/movies-en/Example Movie (2026)/Example Movie.mkv",
+            radarr_audio_languages=["cz"],
+        )
+
+        result = finalizer.evaluate_movie_final(
+            movie_state,
+            {"allowed_final_audio_languages": ["cz"], "allow_radarr_language_fallback": True},
+            {"min_file_size_mb": 0},
+            {},
+        )
+
+        self.assertTrue(result.is_final)
+        self.assertEqual(movie_state.audio_languages, ["cz"])
+        self.assertEqual(movie_state.language_detection_source, "radarr-api-fallback")
 
     def test_normalize_language_tag_exact_and_title_fallback(self) -> None:
         self.assertEqual(finalizer.normalize_language_tag("eng", exact_only=True), "en")
@@ -724,6 +762,89 @@ class FinalizerHelperTests(unittest.TestCase):
             self.assertTrue((destination / video.name).exists())
             self.assertTrue((destination / subtitle.name).exists())
             self.assertTrue(unrelated_subtitle.exists())
+
+    def test_build_movie_move_plan_includes_subtitle_sidecars(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "movies-en" / "Example Movie (2026)"
+            source.mkdir(parents=True)
+            video = source / "Example Movie.mkv"
+            subtitle = source / "Example Movie.en.srt"
+            video.write_text("video", encoding="utf-8")
+            subtitle.write_text("subtitle", encoding="utf-8")
+            movie_state = finalizer.MovieState(
+                movie_id=77,
+                title="Example Movie",
+                movie_path=str(source),
+                movie_file_id=700,
+                file_path=str(video),
+                is_final=True,
+            )
+
+            plan = finalizer.build_movie_move_plan(
+                movie_state,
+                {
+                    "name": "movies",
+                    "source_prefix": str(root / "movies-en"),
+                    "target_prefix": str(root / "movies-cz"),
+                },
+                finalizer.MovieEvaluationResult(True, "cz", "movie is final", None),
+                {"move_to_temporary_folder_first": True, "temporary_suffix": ".__moving__"},
+                dry_run=True,
+            )
+
+            self.assertEqual(plan.movie_id, 77)
+            self.assertEqual(plan.destination_path, str(root / "movies-cz" / "Example Movie (2026)" / "Example Movie.mkv"))
+            self.assertEqual([Path(item.source_path).name for item in plan.move_items], [video.name, subtitle.name])
+
+    def test_complete_radarr_movie_move_unmonitors_after_successful_move(self) -> None:
+        class FakeRadarrClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, int]] = []
+
+            def unmonitor_movie(self, movie_id: int) -> None:
+                self.calls.append(("unmonitor", movie_id))
+
+            def rescan_movie(self, movie_id: int) -> None:
+                self.calls.append(("rescan", movie_id))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "movies-en" / "Example Movie (2026)"
+            destination = root / "movies-cz" / "Example Movie (2026)"
+            source.mkdir(parents=True)
+            video = source / "Example Movie.mkv"
+            video.write_text("video", encoding="utf-8")
+            plan = finalizer.MovieMovePlan(
+                movie_id=77,
+                movie_title="Example Movie",
+                mapping_name="movies",
+                target_language="cz",
+                source_path=str(video),
+                destination_path=str(destination / "Example Movie.mkv"),
+                dry_run=False,
+                move_method="shutil.move",
+                will_move=True,
+                will_unmonitor=True,
+                will_rescan=True,
+                move_items=[
+                    finalizer.MoveItem(
+                        episode_id=77,
+                        episode_number=None,
+                        source_path=str(video),
+                        destination_path=str(destination / "Example Movie.mkv"),
+                        temporary_destination_path=str(destination / "Example Movie.mkv") + ".__moving__",
+                    )
+                ],
+                file_count=1,
+            )
+            client = FakeRadarrClient()
+
+            finalizer.complete_radarr_movie_move(client, plan, {"fail_if_destination_exists": True})
+
+            self.assertFalse(video.exists())
+            self.assertTrue((destination / "Example Movie.mkv").exists())
+            self.assertEqual(client.calls, [("unmonitor", 77), ("rescan", 77)])
 
     def test_unmonitor_after_whole_season_move_unmonitors_season_and_episode_ids(self) -> None:
         class FakeClient:

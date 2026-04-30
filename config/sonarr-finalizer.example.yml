@@ -22,6 +22,16 @@ sonarr_instances:
     maintenance_roots:
       staging_jp: "/anime-jp"
 
+radarr_instances:
+  movies:
+    url: "http://radarr:7878"
+    lan_url: "http://LAN_RADARR_HOST:7878"
+    tailscale_url: "http://TAILSCALE_RADARR_HOST:7878"
+    api_key: ""
+    instance_type: "movie"
+    maintenance_roots:
+      staging_en: "/movies-en"
+
 paths:
   local_mounts: []
 
@@ -37,6 +47,12 @@ paths:
       source_prefix: "/anime-jp"
       target_prefix: "/anime-en"
       final_language: "en"
+
+    - name: "Movie English maintenance to Czech target"
+      instance_type: "movie"
+      source_prefix: "/movies-en"
+      target_prefix: "/movies-cz"
+      final_language: "cz"
 
 rules:
   tv:
@@ -54,6 +70,12 @@ rules:
     evaluate_monitored_only: true
     allow_subtitle_as_final: false
     allow_sonarr_language_fallback: true
+
+  movie:
+    allowed_final_audio_languages:
+      - "cz"
+    allow_subtitle_as_final: false
+    allow_radarr_language_fallback: true
 
 safety:
   dry_run: true
