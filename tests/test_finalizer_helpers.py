@@ -763,15 +763,17 @@ class FinalizerHelperTests(unittest.TestCase):
             self.assertTrue((destination / subtitle.name).exists())
             self.assertTrue(unrelated_subtitle.exists())
 
-    def test_build_movie_move_plan_includes_subtitle_sidecars(self) -> None:
+    def test_build_movie_move_plan_moves_whole_movie_folder(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             source = root / "movies-en" / "Example Movie (2026)"
             source.mkdir(parents=True)
             video = source / "Example Movie.mkv"
             subtitle = source / "Example Movie.en.srt"
+            artwork = source / "folder.jpg"
             video.write_text("video", encoding="utf-8")
             subtitle.write_text("subtitle", encoding="utf-8")
+            artwork.write_text("artwork", encoding="utf-8")
             movie_state = finalizer.MovieState(
                 movie_id=77,
                 title="Example Movie",
@@ -794,8 +796,10 @@ class FinalizerHelperTests(unittest.TestCase):
             )
 
             self.assertEqual(plan.movie_id, 77)
-            self.assertEqual(plan.destination_path, str(root / "movies-cz" / "Example Movie (2026)" / "Example Movie.mkv"))
-            self.assertEqual([Path(item.source_path).name for item in plan.move_items], [video.name, subtitle.name])
+            self.assertEqual(plan.source_folder, str(source))
+            self.assertEqual(plan.destination_folder, str(root / "movies-cz" / "Example Movie (2026)"))
+            self.assertEqual(plan.temporary_destination_folder, str(root / "movies-cz" / "Example Movie (2026)") + ".__moving__")
+            self.assertEqual(plan.file_path, str(video))
 
     def test_complete_radarr_movie_move_unmonitors_after_successful_move(self) -> None:
         class FakeRadarrClient:
@@ -814,36 +818,31 @@ class FinalizerHelperTests(unittest.TestCase):
             destination = root / "movies-cz" / "Example Movie (2026)"
             source.mkdir(parents=True)
             video = source / "Example Movie.mkv"
+            artwork = source / "folder.jpg"
             video.write_text("video", encoding="utf-8")
+            artwork.write_text("artwork", encoding="utf-8")
             plan = finalizer.MovieMovePlan(
                 movie_id=77,
                 movie_title="Example Movie",
                 mapping_name="movies",
                 target_language="cz",
-                source_path=str(video),
-                destination_path=str(destination / "Example Movie.mkv"),
+                source_folder=str(source),
+                destination_folder=str(destination),
+                temporary_destination_folder=str(destination) + ".__moving__",
                 dry_run=False,
                 move_method="shutil.move",
                 will_move=True,
                 will_unmonitor=True,
                 will_rescan=True,
-                move_items=[
-                    finalizer.MoveItem(
-                        episode_id=77,
-                        episode_number=None,
-                        source_path=str(video),
-                        destination_path=str(destination / "Example Movie.mkv"),
-                        temporary_destination_path=str(destination / "Example Movie.mkv") + ".__moving__",
-                    )
-                ],
-                file_count=1,
+                file_path=str(video),
             )
             client = FakeRadarrClient()
 
             finalizer.complete_radarr_movie_move(client, plan, {"fail_if_destination_exists": True})
 
-            self.assertFalse(video.exists())
+            self.assertFalse(source.exists())
             self.assertTrue((destination / "Example Movie.mkv").exists())
+            self.assertTrue((destination / "folder.jpg").exists())
             self.assertEqual(client.calls, [("unmonitor", 77), ("rescan", 77)])
 
     def test_unmonitor_after_whole_season_move_unmonitors_season_and_episode_ids(self) -> None:

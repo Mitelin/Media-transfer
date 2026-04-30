@@ -154,15 +154,15 @@ class MovieMovePlan:
     movie_title: str
     mapping_name: str | None
     target_language: str | None
-    source_path: str
-    destination_path: str
+    source_folder: str
+    destination_folder: str
+    temporary_destination_folder: str | None
     dry_run: bool
     move_method: str
     will_move: bool
     will_unmonitor: bool
     will_rescan: bool
-    move_items: list[MoveItem]
-    file_count: int
+    file_path: str
 
 
 @dataclass
@@ -1143,47 +1143,34 @@ def build_movie_move_plan(
 ) -> MovieMovePlan:
     if not movie_state.file_path:
         raise ValueError("movie file path is required")
-    source_path = movie_state.file_path
-    destination_path = determine_destination(source_path, mapping)
-    use_temporary = bool(safety.get("move_to_temporary_folder_first", True))
-    temporary_suffix = str(safety.get("temporary_suffix", ".__moving__"))
-    source_paths = [source_path, *find_subtitle_sidecars(source_path)]
-    move_items = []
-    for item_source_path in source_paths:
-        item_destination_path = determine_destination(item_source_path, mapping)
-        move_items.append(
-            MoveItem(
-                episode_id=movie_state.movie_id,
-                episode_number=None,
-                source_path=item_source_path,
-                destination_path=item_destination_path,
-                temporary_destination_path=item_destination_path + temporary_suffix if use_temporary else None,
-            )
-        )
+    source_folder = movie_state.movie_path or os.path.dirname(movie_state.file_path)
+    destination_folder = determine_destination(source_folder, mapping)
+    temporary_destination_folder = None
+    if safety.get("move_to_temporary_folder_first", True):
+        temporary_destination_folder = destination_folder + str(safety.get("temporary_suffix", ".__moving__"))
     return MovieMovePlan(
         movie_id=movie_state.movie_id,
         movie_title=movie_state.title,
         mapping_name=mapping.get("name"),
         target_language=result.target_language,
-        source_path=source_path,
-        destination_path=destination_path,
+        source_folder=source_folder,
+        destination_folder=destination_folder,
+        temporary_destination_folder=temporary_destination_folder,
         dry_run=dry_run,
         move_method=str(safety.get("move_method", "shutil.move")),
         will_move=result.is_final,
         will_unmonitor=result.is_final,
         will_rescan=result.is_final,
-        move_items=move_items,
-        file_count=len(move_items),
+        file_path=movie_state.file_path,
     )
 
 
 def log_movie_move_plan(plan: MovieMovePlan) -> None:
     LOG.info("Movie move plan: %s", json.dumps(asdict(plan), ensure_ascii=False, sort_keys=True))
     action_prefix = "DRY RUN: would" if plan.dry_run else "EXECUTE: will"
-    for item in plan.move_items:
-        LOG.info("%s move movie file %s to %s", action_prefix, item.source_path, item.destination_path)
-        if item.temporary_destination_path:
-            LOG.info("%s use temporary file %s", action_prefix, item.temporary_destination_path)
+    LOG.info("%s move movie folder %s to %s", action_prefix, plan.source_folder, plan.destination_folder)
+    if plan.temporary_destination_folder:
+        LOG.info("%s use temporary destination %s", action_prefix, plan.temporary_destination_folder)
     LOG.info("%s unmonitor Radarr movie %s", action_prefix, plan.movie_id)
     LOG.info("%s rescan Radarr movie %s", action_prefix, plan.movie_id)
 
@@ -1196,28 +1183,28 @@ def preflight_movie_move_plan(plan: MovieMovePlan, safety: dict[str, Any]) -> Mo
             season_number=0,
             mapping_name=plan.mapping_name,
             target_language=plan.target_language,
-            source_folder=os.path.dirname(plan.source_path),
-            destination_folder=os.path.dirname(plan.destination_path),
-            temporary_destination_folder=None,
+            source_folder=plan.source_folder,
+            destination_folder=plan.destination_folder,
+            temporary_destination_folder=plan.temporary_destination_folder,
             dry_run=plan.dry_run,
             move_method=plan.move_method,
-            partial_move=True,
+            partial_move=False,
             will_move=plan.will_move,
             will_unmonitor=plan.will_unmonitor,
             will_rescan=plan.will_rescan,
             unmonitor_season_number=None,
             unmonitor_episode_ids=[plan.movie_id],
-            move_items=plan.move_items,
+            move_items=[],
             episode_count=1,
             relevant_episode_count=1,
-            episode_file_count=plan.file_count,
+            episode_file_count=1,
         ),
         safety,
     )
 
 
 def complete_radarr_movie_move(client: RadarrClient, plan: MovieMovePlan, safety: dict[str, Any]) -> None:
-    move_episode_files(plan.move_items, safety)
+    move_season(plan.source_folder, plan.destination_folder, safety)
     client.unmonitor_movie(plan.movie_id)
     client.rescan_movie(plan.movie_id)
 
@@ -1622,8 +1609,8 @@ def run_radarr_flow(
 
     move_plan = build_movie_move_plan(movie_state, mapping, result, safety, dry_run)
     LOG.info("Selected mapping: %s", mapping.get("name"))
-    LOG.info("Source file: %s", move_plan.source_path)
-    LOG.info("Destination file: %s", move_plan.destination_path)
+    LOG.info("Source folder: %s", move_plan.source_folder)
+    LOG.info("Destination folder: %s", move_plan.destination_folder)
     log_movie_move_plan(move_plan)
 
     if dry_run:

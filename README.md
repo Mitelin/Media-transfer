@@ -4,7 +4,7 @@ Python finalizer pro Sonarr a Radarr post-import/post-upgrade workflow. První v
 
 Důležité: script pracuje jen s údržbovými knihovnami v `source_prefix`. Cílovou knihovnu nevyhodnocuje a nepoužívá jako Sonarr pracovní stav. Pokud je cílem CZ, údržbová knihovna je typicky English a z ní se hotová season převádí do CZ cíle.
 
-Radarr varianta je jednodušší: vyhodnotí se konkrétní movie file, a pokud obsahuje cílový jazyk, přesune se do cíle včetně externích titulků se stejným základem názvu. Po úspěšném přesunu se film v Radarru odmonitoruje a spustí se rescan movie.
+Radarr varianta je jednodušší: vyhodnotí se konkrétní movie file, a pokud obsahuje cílový jazyk, přesune se celá movie složka do cíle včetně titulků, NFO a artworku. Po úspěšném přesunu se film v Radarru odmonitoruje a spustí se rescan movie.
 
 Aktuální pravidla této verze:
 
@@ -195,7 +195,7 @@ Pro fyzické složky `Season 01`, `Season 02` atd. platí whole-season režim: p
 
 Monitored/relevant epizoda bez souboru je hard stop pro celou danou season. Script ji bere jako signál, že season ještě vychází nebo není kompletní, a nepřesune nic ani v loose-folder režimu.
 
-U Radarru nejsou seasons ani partial season pravidla. Jakmile vybraný movie file splní cílový jazyk, naplánuje se přesun souboru plus externích titulků a po úspěchu se film nastaví v Radarru na `monitored=false`.
+U Radarru nejsou seasons ani partial season pravidla. Jakmile vybraný movie file splní cílový jazyk, naplánuje se přesun celé movie složky a po úspěchu se film nastaví v Radarru na `monitored=false`.
 
 Linux/Sonarr container styl:
 
