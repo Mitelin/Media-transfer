@@ -578,6 +578,20 @@ class FinalizerHelperTests(unittest.TestCase):
             self.assertTrue(source.exists())
             self.assertTrue(destination.exists())
 
+    def test_move_season_creates_missing_destination_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source" / "Season 01"
+            destination = root / "target" / "Example" / "Season 01"
+            source.mkdir(parents=True)
+            (source / "Episode 01.mkv").write_text("media", encoding="utf-8")
+
+            finalizer.move_season(str(source), str(destination), {"fail_if_destination_exists": True})
+
+            self.assertFalse(source.exists())
+            self.assertTrue(destination.exists())
+            self.assertTrue((destination / "Episode 01.mkv").exists())
+
     def test_move_episode_files_moves_only_selected_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
