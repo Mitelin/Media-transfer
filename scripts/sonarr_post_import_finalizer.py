@@ -237,8 +237,10 @@ def get_active_sonarr_config(config: dict[str, Any], instance_override: str | No
         raise ValueError(f"active_instance {active_instance!r} not found in sonarr_instances")
     instance = dict(instances[active_instance])
     instance["name"] = active_instance
-    if not instance.get("url") or not instance.get("api_key"):
-        raise ValueError(f"Sonarr instance {active_instance!r} needs url and api_key")
+    if not instance.get("url"):
+        raise ValueError(f"Sonarr instance {active_instance!r} missing url")
+    if not instance.get("api_key"):
+        raise ValueError(f"Sonarr instance {active_instance!r} missing api key")
     return instance
 
 
@@ -283,7 +285,7 @@ def validate_config(config: dict[str, Any]) -> tuple[list[str], list[str]]:
                 warnings.append(f"sonarr_instances.{instance_name}.{key} is empty")
         api_key = str(instance.get("api_key") or "")
         if not api_key:
-            warnings.append(f"sonarr_instances.{instance_name}.api_key is empty; fill it in local config before runtime")
+            warnings.append(f"sonarr_instances.{instance_name}.api_key missing api key; fill it in local config before runtime")
         roots = instance.get("maintenance_roots") or {}
         if not isinstance(roots, dict) or not roots:
             warnings.append(f"sonarr_instances.{instance_name}.maintenance_roots is empty")

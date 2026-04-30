@@ -250,7 +250,7 @@ class FinalizerHelperTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(warnings, [])
 
-    def test_validate_config_warns_for_empty_template_secret(self) -> None:
+    def test_validate_config_warns_for_missing_api_key(self) -> None:
         config = {
             "active_instance": "anime",
             "sonarr_instances": {
@@ -277,7 +277,20 @@ class FinalizerHelperTests(unittest.TestCase):
         }
         errors, warnings = finalizer.validate_config(config)
         self.assertEqual(errors, [])
-        self.assertIn("sonarr_instances.anime.api_key is empty; fill it in local config before runtime", warnings)
+        self.assertIn("sonarr_instances.anime.api_key missing api key; fill it in local config before runtime", warnings)
+
+    def test_resolve_active_instance_rejects_missing_api_key(self) -> None:
+        config = {
+            "active_instance": "anime",
+            "sonarr_instances": {
+                "anime": {
+                    "url": "http://sonarr-anime:8989",
+                    "api_key": "",
+                }
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "missing api key"):
+            finalizer.get_active_sonarr_config(config)
 
     def test_validate_config_rejects_invalid_mapping(self) -> None:
         config = {
