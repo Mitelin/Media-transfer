@@ -370,6 +370,7 @@ class FinalizerHelperTests(unittest.TestCase):
         self.assertTrue(plan.will_move)
         self.assertTrue(plan.will_unmonitor)
         self.assertTrue(plan.will_rescan)
+        self.assertEqual(plan.unmonitor_season_number, 2)
         self.assertEqual(plan.unmonitor_episode_ids, [1])
         self.assertEqual(plan.move_items, [])
         self.assertEqual(plan.episode_count, 2)
@@ -424,6 +425,7 @@ class FinalizerHelperTests(unittest.TestCase):
         )
 
         self.assertTrue(plan.partial_move)
+        self.assertIsNone(plan.unmonitor_season_number)
         self.assertEqual(plan.unmonitor_episode_ids, [10])
         self.assertEqual(plan.episode_count, 3)
         self.assertEqual(plan.relevant_episode_count, 3)
@@ -519,6 +521,7 @@ class FinalizerHelperTests(unittest.TestCase):
                 will_move=True,
                 will_unmonitor=True,
                 will_rescan=True,
+                unmonitor_season_number=1,
                 unmonitor_episode_ids=[1],
                 move_items=[],
                 episode_count=1,
@@ -551,6 +554,7 @@ class FinalizerHelperTests(unittest.TestCase):
                 will_move=True,
                 will_unmonitor=True,
                 will_rescan=True,
+                unmonitor_season_number=1,
                 unmonitor_episode_ids=[1],
                 move_items=[],
                 episode_count=1,
@@ -647,6 +651,84 @@ class FinalizerHelperTests(unittest.TestCase):
             self.assertTrue((destination / video.name).exists())
             self.assertTrue((destination / subtitle.name).exists())
             self.assertTrue(unrelated_subtitle.exists())
+
+    def test_unmonitor_after_whole_season_move_unmonitors_season_and_episode_ids(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, int | list[int]]] = []
+
+            def unmonitor_season(self, series_id: int, season_number: int) -> None:
+                self.calls.append(("season", season_number))
+
+            def unmonitor_episodes(self, episode_ids: list[int]) -> None:
+                self.calls.append(("episodes", episode_ids))
+
+        plan = finalizer.MovePlan(
+            series_id=42,
+            series_title="Example",
+            season_number=2,
+            mapping_name="test",
+            target_language="cz",
+            source_folder="/tv-en/Example/Season 02",
+            destination_folder="/tv-cz/Example/Season 02",
+            temporary_destination_folder=None,
+            dry_run=False,
+            move_method="shutil.move",
+            partial_move=False,
+            will_move=True,
+            will_unmonitor=True,
+            will_rescan=True,
+            unmonitor_season_number=2,
+            unmonitor_episode_ids=[1, 2],
+            move_items=[],
+            episode_count=2,
+            relevant_episode_count=2,
+            episode_file_count=2,
+        )
+        client = FakeClient()
+
+        finalizer.unmonitor_after_move(client, plan)
+
+        self.assertEqual(client.calls, [("season", 2), ("episodes", [1, 2])])
+
+    def test_unmonitor_after_partial_move_unmonitors_only_episode_ids(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, int | list[int]]] = []
+
+            def unmonitor_season(self, series_id: int, season_number: int) -> None:
+                self.calls.append(("season", season_number))
+
+            def unmonitor_episodes(self, episode_ids: list[int]) -> None:
+                self.calls.append(("episodes", episode_ids))
+
+        plan = finalizer.MovePlan(
+            series_id=42,
+            series_title="Example",
+            season_number=1,
+            mapping_name="test",
+            target_language="en",
+            source_folder="/anime-jp/Example",
+            destination_folder="/anime-en/Example",
+            temporary_destination_folder=None,
+            dry_run=False,
+            move_method="shutil.move",
+            partial_move=True,
+            will_move=True,
+            will_unmonitor=True,
+            will_rescan=True,
+            unmonitor_season_number=None,
+            unmonitor_episode_ids=[1],
+            move_items=[],
+            episode_count=2,
+            relevant_episode_count=2,
+            episode_file_count=1,
+        )
+        client = FakeClient()
+
+        finalizer.unmonitor_after_move(client, plan)
+
+        self.assertEqual(client.calls, [("episodes", [1])])
 
 
 if __name__ == "__main__":

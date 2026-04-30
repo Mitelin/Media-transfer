@@ -106,6 +106,7 @@ class MovePlan:
     will_move: bool
     will_unmonitor: bool
     will_rescan: bool
+    unmonitor_season_number: int | None
     unmonitor_episode_ids: list[int]
     move_items: list[MoveItem]
     episode_count: int
@@ -998,6 +999,7 @@ def build_move_plan(
         will_move=bool(move_episodes),
         will_unmonitor=bool(move_episodes),
         will_rescan=True,
+        unmonitor_season_number=None if partial_move else season_state.season_number,
         unmonitor_episode_ids=[episode.episode_id for episode in move_episodes],
         move_items=move_items,
         episode_count=len(season_state.episodes),
@@ -1019,8 +1021,16 @@ def log_move_plan(plan: MovePlan) -> None:
         LOG.info("%s move %s to %s", action_prefix, plan.source_folder, plan.destination_folder)
         if plan.temporary_destination_folder:
             LOG.info("%s use temporary destination %s", action_prefix, plan.temporary_destination_folder)
-    LOG.info("%s unmonitor moved episodes for season %s: %s", action_prefix, plan.season_number, plan.unmonitor_episode_ids)
+    if plan.unmonitor_season_number is not None:
+        LOG.info("%s unmonitor Sonarr season %s", action_prefix, plan.unmonitor_season_number)
+    LOG.info("%s unmonitor moved episode IDs for season %s: %s", action_prefix, plan.season_number, plan.unmonitor_episode_ids)
     LOG.info("%s rescan series %s", action_prefix, plan.series_id)
+
+
+def unmonitor_after_move(client: SonarrClient, plan: MovePlan) -> None:
+    if plan.unmonitor_season_number is not None:
+        client.unmonitor_season(plan.series_id, plan.unmonitor_season_number)
+    client.unmonitor_episodes(plan.unmonitor_episode_ids)
 
 
 def preflight_move_plan(plan: MovePlan, safety: dict[str, Any]) -> MovePreflightResult:
@@ -1307,7 +1317,7 @@ def main() -> int:
         move_episode_files(move_plan.move_items, safety)
     else:
         move_season(season_state.source_folder, destination, safety)
-    client.unmonitor_episodes(move_plan.unmonitor_episode_ids)
+    unmonitor_after_move(client, move_plan)
     client.rescan_series(season_state.series_id)
     LOG.info("Done")
     return 0
