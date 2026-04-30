@@ -100,6 +100,12 @@ class MovePlan:
     episode_file_count: int
 
 
+@dataclass
+class MovePreflightResult:
+    errors: list[str]
+    warnings: list[str]
+
+
 class SonarrClient:
     def __init__(self, base_url: str, api_key: str) -> None:
         self.base_url = base_url.rstrip("/")
@@ -878,13 +884,43 @@ def log_move_plan(plan: MovePlan) -> None:
     LOG.info("%s rescan series %s", action_prefix, plan.series_id)
 
 
-def folder_has_conflict(destination: str) -> bool:
-    if not os.path.exists(destination):
-        return False
-    if not os.path.isdir(destination):
-        return True
-    with os.scandir(destination) as entries:
-        return any(entries)
+def preflight_move_plan(plan: MovePlan, safety: dict[str, Any]) -> MovePreflightResult:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if not plan.source_folder:
+        errors.append("source folder is empty")
+    elif not os.path.exists(plan.source_folder):
+        errors.append(f"source folder does not exist: {plan.source_folder}")
+    elif not os.path.isdir(plan.source_folder):
+        errors.append(f"source path is not a directory: {plan.source_folder}")
+
+    if safety.get("fail_if_destination_exists", True) and os.path.exists(plan.destination_folder):
+        errors.append(f"destination already exists: {plan.destination_folder}")
+
+    if plan.temporary_destination_folder and os.path.exists(plan.temporary_destination_folder):
+        errors.append(f"temporary destination already exists: {plan.temporary_destination_folder}")
+
+    destination_parent = os.path.dirname(plan.destination_folder)
+    if not destination_parent:
+        errors.append(f"destination parent cannot be determined: {plan.destination_folder}")
+    elif os.path.exists(destination_parent) and not os.path.isdir(destination_parent):
+        errors.append(f"destination parent exists but is not a directory: {destination_parent}")
+    elif not os.path.exists(destination_parent):
+        warnings.append(f"destination parent will be created: {destination_parent}")
+
+    return MovePreflightResult(errors, warnings)
+
+
+def log_move_preflight(result: MovePreflightResult) -> None:
+    for warning in result.warnings:
+        LOG.warning("Move preflight warning: %s", warning)
+    for error in result.errors:
+        LOG.error("Move preflight error: %s", error)
+    if result.errors:
+        LOG.error("Move preflight failed: %s error(s), %s warning(s)", len(result.errors), len(result.warnings))
+    else:
+        LOG.info("Move preflight OK: %s warning(s)", len(result.warnings))
 
 
 def verify_folder_sizes(source: str, destination: str) -> bool:
@@ -906,8 +942,8 @@ def collect_file_sizes(folder: str) -> dict[str, int]:
 def move_season(source: str, destination: str, safety: dict[str, Any]) -> None:
     destination_parent = os.path.dirname(destination)
     os.makedirs(destination_parent, exist_ok=True)
-    if folder_has_conflict(destination):
-        raise FileExistsError(f"Destination already exists and is not empty: {destination}")
+    if safety.get("fail_if_destination_exists", True) and os.path.exists(destination):
+        raise FileExistsError(f"Destination already exists: {destination}")
 
     temporary_destination = destination
     if safety.get("move_to_temporary_folder_first", True):
@@ -1070,8 +1106,10 @@ def main() -> int:
     if dry_run:
         return 0
 
-    if safety.get("fail_if_destination_exists", True) and folder_has_conflict(destination):
-        LOG.error("Destination conflict. Not moving and not unmonitoring: %s", destination)
+    preflight = preflight_move_plan(move_plan, safety)
+    log_move_preflight(preflight)
+    if preflight.errors:
+        LOG.error("Move preflight failed. Not moving and not unmonitoring.")
         return 1
 
     move_season(season_state.source_folder, destination, safety)

@@ -190,6 +190,17 @@ Bez `--execute` a bez vypnutého `dry_run` script nic nepřesune.
 
 Skutečný non-dry-run běh je defaultně povolený jen s `--url-mode docker`, aby se omylem neprovedly Sonarr změny z Windows/LAN testu. Přepínač `--allow-non-docker-execute` existuje jen pro vědomé pokročilé testování.
 
+Před skutečným přesunem script provede move preflight:
+
+```text
+source folder musí existovat a být složka
+destination nesmí existovat
+temporary destination nesmí existovat
+destination parent se případně vytvoří
+```
+
+Pokud preflight najde chybu, script nepřesune soubory, neunmonitoruje season a nespustí rescan.
+
 ## 5. Sonarr Custom Script wrappery
 
 Pro nasazení jsou připravené dva wrappery:

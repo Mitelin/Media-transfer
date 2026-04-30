@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -265,6 +266,81 @@ class FinalizerHelperTests(unittest.TestCase):
         self.assertIsNone(plan.temporary_destination_folder)
         self.assertFalse(plan.dry_run)
         self.assertEqual(plan.move_method, "shutil.move")
+
+    def test_preflight_move_plan_accepts_ready_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source" / "Season 01"
+            destination = root / "target" / "Season 01"
+            source.mkdir(parents=True)
+            (source / "Episode 01.mkv").write_text("media", encoding="utf-8")
+            plan = finalizer.MovePlan(
+                series_id=1,
+                series_title="Example",
+                season_number=1,
+                mapping_name="test",
+                target_language="cz",
+                source_folder=str(source),
+                destination_folder=str(destination),
+                temporary_destination_folder=str(destination) + ".__moving__",
+                dry_run=False,
+                move_method="shutil.move",
+                will_move=True,
+                will_unmonitor=True,
+                will_rescan=True,
+                episode_count=1,
+                relevant_episode_count=1,
+                episode_file_count=1,
+            )
+
+            result = finalizer.preflight_move_plan(plan, {"fail_if_destination_exists": True})
+
+            self.assertEqual(result.errors, [])
+            self.assertEqual(result.warnings, [f"destination parent will be created: {destination.parent}"])
+
+    def test_preflight_move_plan_rejects_missing_source_and_existing_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            destination = root / "target" / "Season 01"
+            destination.mkdir(parents=True)
+            plan = finalizer.MovePlan(
+                series_id=1,
+                series_title="Example",
+                season_number=1,
+                mapping_name="test",
+                target_language="cz",
+                source_folder=str(root / "missing"),
+                destination_folder=str(destination),
+                temporary_destination_folder=str(destination) + ".__moving__",
+                dry_run=False,
+                move_method="shutil.move",
+                will_move=True,
+                will_unmonitor=True,
+                will_rescan=True,
+                episode_count=1,
+                relevant_episode_count=1,
+                episode_file_count=1,
+            )
+
+            result = finalizer.preflight_move_plan(plan, {"fail_if_destination_exists": True})
+
+            self.assertIn(f"source folder does not exist: {root / 'missing'}", result.errors)
+            self.assertIn(f"destination already exists: {destination}", result.errors)
+
+    def test_move_season_refuses_existing_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            destination = root / "destination"
+            source.mkdir()
+            destination.mkdir()
+            (source / "Episode 01.mkv").write_text("media", encoding="utf-8")
+
+            with self.assertRaises(FileExistsError):
+                finalizer.move_season(str(source), str(destination), {"fail_if_destination_exists": True})
+
+            self.assertTrue(source.exists())
+            self.assertTrue(destination.exists())
 
 
 if __name__ == "__main__":
