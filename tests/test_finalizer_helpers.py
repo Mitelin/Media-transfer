@@ -532,7 +532,7 @@ class FinalizerHelperTests(unittest.TestCase):
             result = finalizer.preflight_move_plan(plan, {"fail_if_destination_exists": True})
 
             self.assertEqual(result.errors, [])
-            self.assertEqual(result.warnings, [f"destination parent would be created if preflight passes: {destination.parent}"])
+            self.assertEqual(result.warnings, [f"destination parent will be created: {destination.parent}"])
 
     def test_preflight_move_plan_rejects_missing_source_and_existing_destination(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
