@@ -146,6 +146,8 @@ class MovePlan:
     episode_count: int
     relevant_episode_count: int
     episode_file_count: int
+    move_scope: str = "season"
+    unmonitor_season_numbers: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -1360,6 +1362,130 @@ def build_move_plan(
     )
 
 
+def source_season_numbers_in_series(
+    episodes: list[dict[str, Any]],
+    episode_files: list[dict[str, Any]],
+    series_source_folder: str,
+    safety: dict[str, Any],
+) -> list[int]:
+    files_by_id = episode_file_by_id(episode_files)
+    season_numbers: set[int] = set()
+    skip_specials = bool(safety.get("skip_specials", True))
+
+    for episode in episodes:
+        episode_file_id = parse_int(episode.get("episodeFileId"))
+        episode_file = files_by_id.get(episode_file_id) if episode_file_id is not None else None
+        path = episode_file.get("path") if episode_file else None
+        if not path or not path_starts_with(path, series_source_folder):
+            continue
+        season_number = infer_season_from_path(path)
+        if season_number is None:
+            season_number = parse_int(episode.get("seasonNumber"))
+        if season_number is None or (season_number == 0 and skip_specials):
+            continue
+        season_numbers.add(season_number)
+
+    if os.path.isdir(series_source_folder):
+        for entry in os.listdir(series_source_folder):
+            candidate_path = os.path.join(series_source_folder, entry)
+            if not os.path.isdir(candidate_path):
+                continue
+            season_number = infer_season_from_path(entry)
+            if season_number is None or (season_number == 0 and skip_specials):
+                continue
+            season_numbers.add(season_number)
+
+    return sorted(season_numbers)
+
+
+def build_series_folder_move_plan_if_complete(
+    series: dict[str, Any],
+    episodes: list[dict[str, Any]],
+    episode_files: list[dict[str, Any]],
+    current_season_state: SeasonState,
+    current_result: EvaluationResult,
+    mapping: dict[str, Any],
+    rules: dict[str, Any],
+    safety: dict[str, Any],
+    config: dict[str, Any],
+    enable_local_mounts: bool,
+    dry_run: bool,
+) -> MovePlan | None:
+    if not current_result.is_final or not current_season_state.source_folder:
+        return None
+    if not is_physical_season_folder(current_season_state.source_folder):
+        return None
+
+    series_source_folder = media_dirname(current_season_state.source_folder)
+    if not series_source_folder or not path_starts_with(series_source_folder, str(mapping.get("source_prefix", ""))):
+        return None
+
+    season_numbers = source_season_numbers_in_series(episodes, episode_files, series_source_folder, safety)
+    if current_season_state.season_number not in season_numbers:
+        return None
+
+    season_states: list[SeasonState] = []
+    for season_number in season_numbers:
+        if season_number == current_season_state.season_number:
+            season_state = current_season_state
+            result = current_result
+        else:
+            context = EventContext(
+                event_type="Manual",
+                series_id=current_season_state.series_id,
+                series_title=current_season_state.series_title,
+                series_path=series.get("path"),
+                season_number=season_number,
+                imported_file_path=None,
+                episode_file_id=None,
+            )
+            season_state = build_season_state(series, episodes, episode_files, context)
+            result = evaluate_season_final(season_state, rules, safety, config, enable_local_mounts)
+
+        if not result.is_final:
+            LOG.info("Series folder move disabled: season %s is not final: %s", season_number, result.reason)
+            return None
+        if not season_state.source_folder or not is_physical_season_folder(season_state.source_folder):
+            LOG.info("Series folder move disabled: season %s is not in a physical Season folder", season_number)
+            return None
+        if media_normpath(media_dirname(season_state.source_folder)) != media_normpath(series_source_folder):
+            LOG.info("Series folder move disabled: season %s is outside source series folder %s", season_number, series_source_folder)
+            return None
+        season_states.append(season_state)
+
+    destination = determine_destination(series_source_folder, mapping)
+    temporary_destination = None
+    if safety.get("move_to_temporary_folder_first", True):
+        temporary_destination = destination + str(safety.get("temporary_suffix", ".__moving__"))
+
+    relevant_by_season = [relevant_episodes_for_rules(season_state, rules) for season_state in season_states]
+    all_relevant_episodes = [episode for relevant in relevant_by_season for episode in relevant]
+    return MovePlan(
+        series_id=current_season_state.series_id,
+        series_title=current_season_state.series_title,
+        season_number=current_season_state.season_number,
+        mapping_name=mapping.get("name"),
+        target_language=current_result.target_language,
+        source_folder=series_source_folder,
+        destination_folder=destination,
+        temporary_destination_folder=temporary_destination,
+        dry_run=dry_run,
+        move_method=str(safety.get("move_method", "shutil.move")),
+        partial_move=False,
+        will_move=bool(all_relevant_episodes),
+        will_unmonitor=bool(all_relevant_episodes),
+        will_rescan=True,
+        unmonitor_season_number=None,
+        unmonitor_episode_ids=[episode.episode_id for episode in all_relevant_episodes],
+        move_items=[],
+        episode_count=sum(len(season_state.episodes) for season_state in season_states),
+        relevant_episode_count=len(all_relevant_episodes),
+        episode_file_count=sum(1 for episode in all_relevant_episodes if episode.has_file),
+        move_scope="series",
+        unmonitor_season_numbers=season_numbers,
+    )
+
+
 def log_move_plan(plan: MovePlan) -> None:
     LOG.info("Move plan: %s", json.dumps(asdict(plan), ensure_ascii=False, sort_keys=True))
     action_prefix = "DRY RUN: would" if plan.dry_run else "EXECUTE: will"
@@ -1370,11 +1496,16 @@ def log_move_plan(plan: MovePlan) -> None:
             if item.temporary_destination_path:
                 LOG.info("%s use temporary file %s", action_prefix, item.temporary_destination_path)
     else:
-        LOG.info("%s move %s to %s", action_prefix, plan.source_folder, plan.destination_folder)
+        if plan.move_scope == "series":
+            LOG.info("%s move series folder %s to %s", action_prefix, plan.source_folder, plan.destination_folder)
+        else:
+            LOG.info("%s move %s to %s", action_prefix, plan.source_folder, plan.destination_folder)
         if plan.temporary_destination_folder:
             LOG.info("%s use temporary destination %s", action_prefix, plan.temporary_destination_folder)
     if plan.unmonitor_season_number is not None:
         LOG.info("%s unmonitor Sonarr season %s", action_prefix, plan.unmonitor_season_number)
+    if plan.unmonitor_season_numbers:
+        LOG.info("%s unmonitor Sonarr seasons %s", action_prefix, plan.unmonitor_season_numbers)
     LOG.info("%s unmonitor moved episode IDs for season %s: %s", action_prefix, plan.season_number, plan.unmonitor_episode_ids)
     LOG.info("%s rescan series %s", action_prefix, plan.series_id)
 
@@ -1382,6 +1513,9 @@ def log_move_plan(plan: MovePlan) -> None:
 def unmonitor_after_move(client: SonarrClient, plan: MovePlan) -> None:
     if plan.unmonitor_season_number is not None:
         client.unmonitor_season(plan.series_id, plan.unmonitor_season_number)
+    for season_number in plan.unmonitor_season_numbers:
+        if season_number != plan.unmonitor_season_number:
+            client.unmonitor_season(plan.series_id, season_number)
     client.unmonitor_episodes(plan.unmonitor_episode_ids)
 
 
@@ -1783,9 +1917,25 @@ def main() -> int:
 
     destination = determine_destination(season_state.source_folder, mapping)
     move_plan = build_move_plan(season_state, mapping, destination, result, rules, safety, dry_run)
+    series_move_plan = build_series_folder_move_plan_if_complete(
+        series,
+        episodes,
+        episode_files,
+        season_state,
+        result,
+        mapping,
+        rules,
+        safety,
+        config,
+        args.enable_local_mounts,
+        dry_run,
+    )
+    if series_move_plan is not None:
+        LOG.info("All existing source seasons for this series are final. Planning whole series folder move.")
+        move_plan = series_move_plan
     LOG.info("Selected mapping: %s", mapping.get("name"))
-    LOG.info("Source folder: %s", season_state.source_folder)
-    LOG.info("Destination folder: %s", destination)
+    LOG.info("Source folder: %s", move_plan.source_folder)
+    LOG.info("Destination folder: %s", move_plan.destination_folder)
     log_move_plan(move_plan)
 
     if dry_run:
@@ -1800,7 +1950,7 @@ def main() -> int:
     if move_plan.partial_move:
         move_episode_files(move_plan.move_items, safety)
     else:
-        move_season(season_state.source_folder, destination, safety)
+        move_season(move_plan.source_folder, move_plan.destination_folder, safety)
     unmonitor_after_move(client, move_plan)
     client.rescan_series(season_state.series_id)
     LOG.info("Done")

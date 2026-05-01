@@ -763,6 +763,87 @@ class FinalizerHelperTests(unittest.TestCase):
             self.assertTrue((destination / subtitle.name).exists())
             self.assertTrue(unrelated_subtitle.exists())
 
+    def test_build_series_folder_move_plan_when_all_source_seasons_are_final(self) -> None:
+        series = {"title": "Test", "path": "/tv-en/Test"}
+        episodes = [
+            {"id": 101, "episodeNumber": 1, "seasonNumber": 1, "monitored": True, "hasFile": True, "episodeFileId": 1001},
+            {"id": 201, "episodeNumber": 1, "seasonNumber": 2, "monitored": True, "hasFile": True, "episodeFileId": 2001},
+        ]
+        episode_files = [
+            {"id": 1001, "path": "/tv-en/Test/Season 01/Test S01E01.mkv", "languages": [{"name": "Czech"}]},
+            {"id": 2001, "path": "/tv-en/Test/Season 02/Test S02E01.mkv", "languages": [{"name": "Czech"}]},
+        ]
+        current_state = finalizer.build_season_state(
+            series,
+            episodes,
+            episode_files,
+            finalizer.EventContext("Download", 42, None, None, 2, None, None),
+        )
+        rules = {"allowed_final_audio_languages": ["cz"], "evaluate_monitored_only": True, "allow_sonarr_language_fallback": True}
+        safety = {"min_file_size_mb": 0, "move_to_temporary_folder_first": True, "temporary_suffix": ".__moving__"}
+        result = finalizer.evaluate_season_final(current_state, rules, safety, {})
+
+        plan = finalizer.build_series_folder_move_plan_if_complete(
+            series,
+            episodes,
+            episode_files,
+            current_state,
+            result,
+            {"name": "tv", "source_prefix": "/tv-en", "target_prefix": "/tv-cz"},
+            rules,
+            safety,
+            {},
+            False,
+            True,
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.move_scope, "series")
+        self.assertEqual(plan.source_folder, "/tv-en/Test")
+        self.assertEqual(plan.destination_folder, "/tv-cz/Test")
+        self.assertEqual(plan.temporary_destination_folder, "/tv-cz/Test.__moving__")
+        self.assertEqual(plan.unmonitor_season_numbers, [1, 2])
+        self.assertEqual(plan.unmonitor_episode_ids, [101, 201])
+
+    def test_build_series_folder_move_plan_blocks_in_progress_source_season(self) -> None:
+        series = {"title": "Test", "path": "/tv-en/Test"}
+        episodes = [
+            {"id": 101, "episodeNumber": 1, "seasonNumber": 1, "monitored": True, "hasFile": True, "episodeFileId": 1001},
+            {"id": 201, "episodeNumber": 1, "seasonNumber": 2, "monitored": True, "hasFile": True, "episodeFileId": 2001},
+            {"id": 301, "episodeNumber": 1, "seasonNumber": 3, "monitored": True, "hasFile": True, "episodeFileId": 3001},
+        ]
+        episode_files = [
+            {"id": 1001, "path": "/tv-en/Test/Season 01/Test S01E01.mkv", "languages": [{"name": "Czech"}]},
+            {"id": 2001, "path": "/tv-en/Test/Season 02/Test S02E01.mkv", "languages": [{"name": "Czech"}]},
+            {"id": 3001, "path": "/tv-en/Test/Season 03/Test S03E01.mkv", "languages": [{"name": "English"}]},
+        ]
+        current_state = finalizer.build_season_state(
+            series,
+            episodes,
+            episode_files,
+            finalizer.EventContext("Download", 42, None, None, 2, None, None),
+        )
+        rules = {"allowed_final_audio_languages": ["cz"], "evaluate_monitored_only": True, "allow_sonarr_language_fallback": True}
+        safety = {"min_file_size_mb": 0, "move_to_temporary_folder_first": True, "temporary_suffix": ".__moving__"}
+        result = finalizer.evaluate_season_final(current_state, rules, safety, {})
+
+        plan = finalizer.build_series_folder_move_plan_if_complete(
+            series,
+            episodes,
+            episode_files,
+            current_state,
+            result,
+            {"name": "tv", "source_prefix": "/tv-en", "target_prefix": "/tv-cz"},
+            rules,
+            safety,
+            {},
+            False,
+            True,
+        )
+
+        self.assertIsNone(plan)
+
     def test_build_movie_move_plan_moves_whole_movie_folder(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

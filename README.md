@@ -10,6 +10,7 @@ Aktuální pravidla této verze:
 
 - jazyk se vyhodnocuje po relevantních monitored epizodách
 - fyzická `Season NN` složka se přesouvá jen jako celek, nikdy částečně
+- pokud jsou všechny existující fyzické seasons v údržbové složce seriálu hotové, přesune se rovnou celá složka seriálu
 - volné soubory bez `Season NN` složky můžou vytvořit partial per-file plán
 - partial přesun bere k videu i externí titulkové sidecary jako `S01E01.en.srt`
 - monitored/relevant epizoda bez souboru je hard stop pro celou season
@@ -189,9 +190,9 @@ DRY RUN: would unmonitor moved episodes for season 2: [1234, 1235]
 DRY RUN: would rescan series 123
 ```
 
-Unmonitoring se u whole-season přesunu plánuje na dvou úrovních: script odmonitoruje Sonarr season a zároveň odmonitoruje konkrétní přesouvané episode IDs. To chrání běžné chování Sonarru i případy, kde Sonarr fyzickou `Season 04` stále interně eviduje jako epizody jedné dlouhé season 1. U partial loose-folder přesunu se odmonitorují jen konkrétní přesunuté episode IDs.
+Unmonitoring se u whole-season přesunu plánuje na dvou úrovních: script odmonitoruje Sonarr season a zároveň odmonitoruje konkrétní přesouvané episode IDs. Pokud script povýší plán na přesun celé složky seriálu, odmonitoruje všechny přesouvané seasons a jejich episode IDs. To chrání běžné chování Sonarru i případy, kde Sonarr fyzickou `Season 04` stále interně eviduje jako epizody jedné dlouhé season 1. U partial loose-folder přesunu se odmonitorují jen konkrétní přesunuté episode IDs.
 
-Pro fyzické složky `Season 01`, `Season 02` atd. platí whole-season režim: pokud je season mix final a ne-final souborů, script nepřesune nic a čeká, dokud všechny relevantní epizody nejsou ve finálním jazyce. Pokud jsou soubory volně v kořenové/random složce bez `Season NN` adresáře, script může vytvořit partial plán po jednotlivých souborech: final EN/multilang EN soubory přesune a unmonitoruje, JP-only nebo missing epizody nechá na místě a dál monitored. Při partial přesunu přibalí externí titulky ve stejné složce se stejným základem názvu, například `A Gatherer's Adventure in Isekai S01E01.en.srt` k `A Gatherer's Adventure in Isekai S01E01.mp4`.
+Pro fyzické složky `Season 01`, `Season 02` atd. platí whole-season režim: pokud je season mix final a ne-final souborů, script nepřesune nic a čeká, dokud všechny relevantní epizody nejsou ve finálním jazyce. Když jsou ale všechny existující fyzické seasons uvnitř zdrojové složky seriálu hotové, plán se povýší o úroveň výš a přesune se celá složka seriálu, například `/tv-en/Test` na `/tv-cz/Test`. Pokud je vedle hotových seasons ještě rozdělaná `Season 03`, zůstane script u standardního season-level chování. Pokud jsou soubory volně v kořenové/random složce bez `Season NN` adresáře, script může vytvořit partial plán po jednotlivých souborech: final EN/multilang EN soubory přesune a unmonitoruje, JP-only nebo missing epizody nechá na místě a dál monitored. Při partial přesunu přibalí externí titulky ve stejné složce se stejným základem názvu, například `A Gatherer's Adventure in Isekai S01E01.en.srt` k `A Gatherer's Adventure in Isekai S01E01.mp4`.
 
 Monitored/relevant epizoda bez souboru je hard stop pro celou danou season. Script ji bere jako signál, že season ještě vychází nebo není kompletní, a nepřesune nic ani v loose-folder režimu.
 
