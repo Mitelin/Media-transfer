@@ -317,44 +317,6 @@ class FinalizerHelperTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertIn("sonarr_instances.anime.api_key missing api key; fill it in local config before runtime", warnings)
 
-    def test_validate_config_rejects_enabled_jellyfin_without_api_key(self) -> None:
-        config = {
-            "active_instance": "tv",
-            "sonarr_instances": {
-                "tv": {
-                    "url": "http://sonarr:8989",
-                    "lan_url": "http://LAN_SONARR_HOST:8989",
-                    "tailscale_url": "http://TAILSCALE_SONARR_HOST:8989",
-                    "api_key": "secret",
-                    "instance_type": "tv",
-                    "maintenance_roots": {"staging_en": "/tv-en"},
-                }
-            },
-            "jellyfin": {
-                "enabled": True,
-                "url": "http://jellyfin:8096",
-                "lan_url": "http://LAN_JELLYFIN_HOST:8096",
-                "tailscale_url": "http://TAILSCALE_JELLYFIN_HOST:8096",
-                "api_key": "",
-            },
-            "paths": {
-                "mappings": [
-                    {
-                        "instance_type": "tv",
-                        "source_prefix": "/tv-en",
-                        "target_prefix": "/tv-cz",
-                        "final_language": "cz",
-                    }
-                ]
-            },
-            "rules": {"tv": {"allowed_final_audio_languages": ["cz"]}},
-        }
-
-        errors, warnings = finalizer.validate_config(config)
-
-        self.assertIn("jellyfin.api_key is required when jellyfin.enabled is true", errors)
-        self.assertEqual(warnings, [])
-
     def test_resolve_active_instance_rejects_missing_api_key(self) -> None:
         config = {
             "active_instance": "anime",
@@ -850,14 +812,6 @@ class FinalizerHelperTests(unittest.TestCase):
             def rescan_movie(self, movie_id: int) -> None:
                 self.calls.append(("rescan", movie_id))
 
-        class FakeJellyfinClient:
-            def __init__(self) -> None:
-                self.base_url = "http://jellyfin:8096"
-                self.calls: list[str] = []
-
-            def refresh_libraries(self) -> None:
-                self.calls.append("refresh")
-
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             source = root / "movies-en" / "Example Movie (2026)"
@@ -883,34 +837,13 @@ class FinalizerHelperTests(unittest.TestCase):
                 file_path=str(video),
             )
             client = FakeRadarrClient()
-            jellyfin_client = FakeJellyfinClient()
 
-            finalizer.complete_radarr_movie_move(client, plan, {"fail_if_destination_exists": True}, jellyfin_client)
+            finalizer.complete_radarr_movie_move(client, plan, {"fail_if_destination_exists": True})
 
             self.assertFalse(source.exists())
             self.assertTrue((destination / "Example Movie.mkv").exists())
             self.assertTrue((destination / "folder.jpg").exists())
             self.assertEqual(client.calls, [("unmonitor", 77), ("rescan", 77)])
-            self.assertEqual(jellyfin_client.calls, ["refresh"])
-
-    def test_build_jellyfin_client_uses_selected_url_mode(self) -> None:
-        client = finalizer.build_jellyfin_client(
-            {
-                "jellyfin": {
-                    "enabled": True,
-                    "url": "http://jellyfin:8096",
-                    "lan_url": "http://LAN_JELLYFIN_HOST:8096",
-                    "tailscale_url": "http://TAILSCALE_JELLYFIN_HOST:8096",
-                    "api_key": "secret",
-                    "refresh_after_move": True,
-                }
-            },
-            "lan",
-        )
-
-        self.assertIsNotNone(client)
-        assert client is not None
-        self.assertEqual(client.base_url, "http://LAN_JELLYFIN_HOST:8096")
 
     def test_unmonitor_after_whole_season_move_unmonitors_season_and_episode_ids(self) -> None:
         class FakeClient:

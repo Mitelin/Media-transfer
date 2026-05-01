@@ -32,14 +32,6 @@ radarr_instances:
     maintenance_roots:
       staging_en: "/movies-en"
 
-jellyfin:
-  enabled: false
-  url: "http://jellyfin:8096"
-  lan_url: "http://LAN_JELLYFIN_HOST:8096"
-  tailscale_url: "http://TAILSCALE_JELLYFIN_HOST:8096"
-  api_key: ""
-  refresh_after_move: true
-
 paths:
   local_mounts: []
 
