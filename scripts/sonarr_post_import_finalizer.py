@@ -252,6 +252,20 @@ class RadarrClient(SonarrClient):
         self.post("/api/v3/command", {"name": "RescanMovie", "movieId": movie_id})
 
 
+class JellyfinClient:
+    def __init__(self, base_url: str, api_key: str) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.session = requests.Session()
+        self.session.headers.update({"X-Emby-Token": api_key})
+
+    def post(self, path: str, **params: Any) -> None:
+        response = self.session.post(f"{self.base_url}{path}", params=params, timeout=60)
+        response.raise_for_status()
+
+    def refresh_libraries(self) -> None:
+        self.post("/Library/Refresh")
+
+
 def normalize_records(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return payload
@@ -336,17 +350,60 @@ def get_active_instance_config(config: dict[str, Any], instance_override: str | 
     return instance
 
 
-def get_sonarr_base_url(instance: dict[str, Any], url_mode: str) -> str:
+def get_url_by_mode(config_section: dict[str, Any], url_mode: str, label: str) -> str:
     key_by_mode = {
         "docker": "url",
         "lan": "lan_url",
         "tailscale": "tailscale_url",
     }
     key = key_by_mode[url_mode]
-    base_url = instance.get(key)
+    base_url = config_section.get(key)
     if not base_url:
-        raise ValueError(f"Sonarr instance {instance.get('name')!r} does not define {key}")
+        raise ValueError(f"{label} does not define {key}")
     return str(base_url)
+
+
+def get_sonarr_base_url(instance: dict[str, Any], url_mode: str) -> str:
+    return get_url_by_mode(instance, url_mode, f"{app_label(instance)} instance {instance.get('name')!r}")
+
+
+def jellyfin_config(config: dict[str, Any]) -> dict[str, Any]:
+    jellyfin = config.get("jellyfin") or {}
+    return jellyfin if isinstance(jellyfin, dict) else {}
+
+
+def jellyfin_refresh_enabled(config: dict[str, Any]) -> bool:
+    jellyfin = jellyfin_config(config)
+    return bool(jellyfin.get("enabled", False)) and bool(jellyfin.get("refresh_after_move", True))
+
+
+def get_jellyfin_base_url(config: dict[str, Any], url_mode: str) -> str:
+    return get_url_by_mode(jellyfin_config(config), url_mode, "Jellyfin config")
+
+
+def build_jellyfin_client(config: dict[str, Any], url_mode: str) -> JellyfinClient | None:
+    if not jellyfin_refresh_enabled(config):
+        return None
+    jellyfin = jellyfin_config(config)
+    api_key = str(jellyfin.get("api_key") or "")
+    if not api_key:
+        raise ValueError("Jellyfin config missing api key")
+    return JellyfinClient(get_jellyfin_base_url(config, url_mode), api_key)
+
+
+def log_jellyfin_refresh_plan(config: dict[str, Any], url_mode: str, dry_run: bool) -> None:
+    if not jellyfin_refresh_enabled(config):
+        return
+    action_prefix = "DRY RUN: would" if dry_run else "EXECUTE: will"
+    LOG.info("%s request Jellyfin library refresh at %s", action_prefix, get_jellyfin_base_url(config, url_mode))
+
+
+def refresh_jellyfin_after_move(client: JellyfinClient | None) -> None:
+    if client is None:
+        return
+    LOG.info("Requesting Jellyfin library refresh at %s", client.base_url)
+    client.refresh_libraries()
+    LOG.info("Jellyfin library refresh requested")
 
 
 def validate_config(config: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -355,12 +412,16 @@ def validate_config(config: dict[str, Any]) -> tuple[list[str], list[str]]:
 
     sonarr_instances = config.get("sonarr_instances") or {}
     radarr_instances = config.get("radarr_instances") or {}
+    jellyfin = config.get("jellyfin") or {}
     if not isinstance(sonarr_instances, dict):
         errors.append("sonarr_instances must be a mapping")
         sonarr_instances = {}
     if not isinstance(radarr_instances, dict):
         errors.append("radarr_instances must be a mapping")
         radarr_instances = {}
+    if jellyfin and not isinstance(jellyfin, dict):
+        errors.append("jellyfin must be a mapping")
+        jellyfin = {}
     if not sonarr_instances and not radarr_instances:
         errors.append("at least one of sonarr_instances or radarr_instances must be a non-empty mapping")
 
@@ -391,6 +452,13 @@ def validate_config(config: dict[str, Any]) -> tuple[list[str], list[str]]:
             roots = instance.get("maintenance_roots") or {}
             if not isinstance(roots, dict) or not roots:
                 warnings.append(f"{group_name}.{instance_name}.maintenance_roots is empty")
+
+    if isinstance(jellyfin, dict) and jellyfin.get("enabled", False):
+        for key in ("url", "lan_url", "tailscale_url"):
+            if not jellyfin.get(key):
+                errors.append(f"jellyfin.{key} is required when jellyfin.enabled is true")
+        if not str(jellyfin.get("api_key") or ""):
+            errors.append("jellyfin.api_key is required when jellyfin.enabled is true")
 
     for instance_name, instance in instances.items():
         if not isinstance(instance, dict):
@@ -1203,10 +1271,16 @@ def preflight_movie_move_plan(plan: MovieMovePlan, safety: dict[str, Any]) -> Mo
     )
 
 
-def complete_radarr_movie_move(client: RadarrClient, plan: MovieMovePlan, safety: dict[str, Any]) -> None:
+def complete_radarr_movie_move(
+    client: RadarrClient,
+    plan: MovieMovePlan,
+    safety: dict[str, Any],
+    jellyfin_client: JellyfinClient | None = None,
+) -> None:
     move_season(plan.source_folder, plan.destination_folder, safety)
     client.unmonitor_movie(plan.movie_id)
     client.rescan_movie(plan.movie_id)
+    refresh_jellyfin_after_move(jellyfin_client)
 
 
 def find_path_mapping(config: dict[str, Any], instance_type: str, source_folder: str, target_language: str | None) -> dict[str, Any] | None:
@@ -1551,6 +1625,7 @@ def log_evaluation(result: EvaluationResult) -> None:
 
 def run_radarr_flow(
     client: RadarrClient,
+    jellyfin_client: JellyfinClient | None,
     config: dict[str, Any],
     instance_config: dict[str, Any],
     safety: dict[str, Any],
@@ -1612,6 +1687,7 @@ def run_radarr_flow(
     LOG.info("Source folder: %s", move_plan.source_folder)
     LOG.info("Destination folder: %s", move_plan.destination_folder)
     log_movie_move_plan(move_plan)
+    log_jellyfin_refresh_plan(config, args.url_mode, dry_run)
 
     if dry_run:
         return 0
@@ -1622,7 +1698,7 @@ def run_radarr_flow(
         LOG.error("Move preflight failed. Not moving and not unmonitoring.")
         return 1
 
-    complete_radarr_movie_move(client, move_plan, safety)
+    complete_radarr_movie_move(client, move_plan, safety, jellyfin_client)
     LOG.info("Done")
     return 0
 
@@ -1687,6 +1763,9 @@ def main() -> int:
     )
     LOG.info("Dry run: %s", dry_run)
     LOG.info("Local mount translation: %s", args.enable_local_mounts)
+    jellyfin_client = build_jellyfin_client(config, args.url_mode)
+    if jellyfin_client:
+        LOG.info("Jellyfin refresh enabled: url_mode=%s url=%s", args.url_mode, jellyfin_client.base_url)
 
     if instance_config.get("app") == "radarr":
         client = RadarrClient(base_url, str(instance_config["api_key"]))
@@ -1697,7 +1776,7 @@ def main() -> int:
         if args.list_series:
             LOG.error("--list-series is only valid for Sonarr instances; use --list-movies for Radarr")
             return 2
-        return run_radarr_flow(client, config, instance_config, safety, dry_run, args)
+        return run_radarr_flow(client, jellyfin_client, config, instance_config, safety, dry_run, args)
 
     client = SonarrClient(base_url, str(instance_config["api_key"]))
     if args.test_api:
@@ -1787,6 +1866,7 @@ def main() -> int:
     LOG.info("Source folder: %s", season_state.source_folder)
     LOG.info("Destination folder: %s", destination)
     log_move_plan(move_plan)
+    log_jellyfin_refresh_plan(config, args.url_mode, dry_run)
 
     if dry_run:
         return 0
@@ -1803,6 +1883,7 @@ def main() -> int:
         move_season(season_state.source_folder, destination, safety)
     unmonitor_after_move(client, move_plan)
     client.rescan_series(season_state.series_id)
+    refresh_jellyfin_after_move(jellyfin_client)
     LOG.info("Done")
     return 0
 

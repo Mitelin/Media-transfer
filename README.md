@@ -4,7 +4,7 @@ Python finalizer pro Sonarr a Radarr post-import/post-upgrade workflow. První v
 
 Důležité: script pracuje jen s údržbovými knihovnami v `source_prefix`. Cílovou knihovnu nevyhodnocuje a nepoužívá jako Sonarr pracovní stav. Pokud je cílem CZ, údržbová knihovna je typicky English a z ní se hotová season převádí do CZ cíle.
 
-Radarr varianta je jednodušší: vyhodnotí se konkrétní movie file, a pokud obsahuje cílový jazyk, přesune se celá movie složka do cíle včetně titulků, NFO a artworku. Po úspěšném přesunu se film v Radarru odmonitoruje a spustí se rescan movie.
+Radarr varianta je jednodušší: vyhodnotí se konkrétní movie file, a pokud obsahuje cílový jazyk, přesune se celá movie složka do cíle včetně titulků, NFO a artworku. Po úspěšném přesunu se film v Radarru odmonitoruje a spustí se rescan movie. Volitelně lze po přesunu poslat Jellyfinu požadavek na scan knihoven, aby si načetl nové nebo změněné soubory.
 
 Aktuální pravidla této verze:
 
@@ -15,6 +15,7 @@ Aktuální pravidla této verze:
 - monitored/relevant epizoda bez souboru je hard stop pro celou season
 - whole-season move odmonitoruje Sonarr season a zároveň konkrétní episode IDs jako pojistku
 - Radarr movie move odmonitoruje celý film po úspěšném přesunu
+- pokud je zapnutý Jellyfin refresh, po úspěšném přesunu se zavolá `POST /Library/Refresh`
 - reálný move je chráněný kombinací `safety.dry_run: false`, `--execute`, Docker URL režimu a preflight kontrol
 
 ## 1. Doplnění konfigurace
@@ -60,7 +61,17 @@ radarr_instances:
     instance_type: "movie"
     maintenance_roots:
       staging_en: "/movies-en"
+
+jellyfin:
+  enabled: false
+  url: "http://jellyfin:8096"
+  lan_url: "http://LAN_JELLYFIN_HOST:8096"
+  tailscale_url: "http://TAILSCALE_JELLYFIN_HOST:8096"
+  api_key: "PUT_JELLYFIN_API_KEY_HERE"
+  refresh_after_move: true
 ```
+
+Jellyfin blok je volitelný. Když nastavíš `enabled: true`, script po úspěšném přesunu a po Sonarr/Radarr rescan požádá Jellyfin o scan všech knihoven přes `POST /Library/Refresh`. V `dry_run` režimu se požadavek jen vypíše do logu a na Jellyfin se nic neposílá.
 
 A zkontroluj path mappingy. `source_prefix` je údržbová knihovna sledovaná Sonarrem, `target_prefix` je cílové umístění pro přesun:
 
@@ -187,6 +198,7 @@ DRY RUN: would move /tv-en/Example/Season 02 to /tv-cz/Example/Season 02
 DRY RUN: would use temporary destination /tv-cz/Example/Season 02.__moving__
 DRY RUN: would unmonitor moved episodes for season 2: [1234, 1235]
 DRY RUN: would rescan series 123
+DRY RUN: would request Jellyfin library refresh at http://jellyfin:8096
 ```
 
 Unmonitoring se u whole-season přesunu plánuje na dvou úrovních: script odmonitoruje Sonarr season a zároveň odmonitoruje konkrétní přesouvané episode IDs. To chrání běžné chování Sonarru i případy, kde Sonarr fyzickou `Season 04` stále interně eviduje jako epizody jedné dlouhé season 1. U partial loose-folder přesunu se odmonitorují jen konkrétní přesunuté episode IDs.
@@ -248,6 +260,8 @@ destination parent se případně vytvoří
 Pokud preflight najde chybu, script nepřesune soubory, neunmonitoruje epizody a nespustí rescan.
 
 Pokud selže skutečný přesun až po přesunutí do temporary cíle nebo před finálním rename, script se pokusí přesunuté soubory nebo složku vrátit zpět na původní místo. Sonarr unmonitoring a rescan se spustí až po úspěšném dokončení move kroku.
+
+Jellyfin refresh se spustí až po úspěšném přesunu a po Sonarr/Radarr API aktualizaci. Pokud není `jellyfin.enabled: true`, script Jellyfin vůbec nevolá.
 
 ## 5. Sonarr Custom Script wrappery
 
