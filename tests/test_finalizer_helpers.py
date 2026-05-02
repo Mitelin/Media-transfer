@@ -1006,6 +1006,48 @@ class FinalizerHelperTests(unittest.TestCase):
             self.assertTrue((source_prefix / "Test").exists())
             self.assertTrue((remaining_season / "Test S03E01.mkv").exists())
 
+    def test_cleanup_empty_source_parent_keeps_series_folder_with_leftover_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_prefix = root / "anime-jp"
+            target_prefix = root / "anime-en"
+            source_series = source_prefix / "Test"
+            source_season = source_series / "Season 02"
+            destination_season = target_prefix / "Test" / "Season 02"
+            source_season.mkdir(parents=True)
+            (source_season / "Test S02E01.mkv").write_text("media", encoding="utf-8")
+            leftover = source_series / ".jellyfin-metadata"
+            leftover.write_text("keep", encoding="utf-8")
+            plan = finalizer.MovePlan(
+                series_id=42,
+                series_title="Test",
+                season_number=2,
+                mapping_name="anime",
+                target_language="en",
+                source_folder=str(source_season),
+                destination_folder=str(destination_season),
+                temporary_destination_folder=str(destination_season) + ".__moving__",
+                dry_run=False,
+                move_method="rename",
+                partial_move=False,
+                will_move=True,
+                will_unmonitor=True,
+                will_rescan=True,
+                unmonitor_season_number=2,
+                unmonitor_episode_ids=[201],
+                move_items=[],
+                episode_count=1,
+                relevant_episode_count=1,
+                episode_file_count=1,
+            )
+
+            finalizer.move_season(plan.source_folder, plan.destination_folder, {"fail_if_destination_exists": True})
+            finalizer.cleanup_empty_source_parent(plan, {"source_prefix": str(source_prefix)})
+
+            self.assertTrue(source_series.exists())
+            self.assertTrue(leftover.exists())
+            self.assertTrue((destination_season / "Test S02E01.mkv").exists())
+
     def test_build_movie_move_plan_moves_whole_movie_folder(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

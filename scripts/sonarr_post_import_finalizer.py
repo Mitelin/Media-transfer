@@ -1435,6 +1435,13 @@ def cleanup_empty_source_parent(plan: MovePlan, mapping: dict[str, Any]) -> None
     parent = source_parent_cleanup_path(plan, mapping)
     if not parent:
         return
+    if not os.path.isdir(parent):
+        LOG.info("Source parent folder already gone or not a directory: %s", parent)
+        return
+    with os.scandir(parent) as entries:
+        if any(True for _ in entries):
+            LOG.info("Source parent folder is not empty, keeping it: %s", parent)
+            return
     try:
         os.rmdir(parent)
     except FileNotFoundError:
