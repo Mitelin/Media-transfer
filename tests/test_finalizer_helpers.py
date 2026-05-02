@@ -399,8 +399,10 @@ class FinalizerHelperTests(unittest.TestCase):
 
     def test_is_physical_season_folder_only_matches_season_directory_name(self) -> None:
         self.assertTrue(finalizer.is_physical_season_folder("/anime-jp/Example/Season 01"))
+        self.assertTrue(finalizer.is_physical_season_folder("/tv-en/Parks and Recreation/Parks and Recreation S06 (360p re-blurip)"))
         self.assertFalse(finalizer.is_physical_season_folder("/anime-jp/Example"))
         self.assertFalse(finalizer.is_physical_season_folder("/anime-jp/Example/Loose S01E01 files"))
+        self.assertFalse(finalizer.is_physical_season_folder("/anime-jp/Example/Example S01E01.mkv"))
 
     def test_find_path_mapping_only_matches_maintenance_source(self) -> None:
         config = {

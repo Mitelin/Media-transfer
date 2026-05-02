@@ -1299,7 +1299,12 @@ def media_relpath(path: str, start: str) -> str:
 def is_physical_season_folder(path: str | None) -> bool:
     if not path:
         return False
-    return bool(re.fullmatch(r"Season[ ._-]*\d{1,2}", media_basename(media_normpath(path)), flags=re.IGNORECASE))
+    basename = media_basename(media_normpath(path))
+    if re.fullmatch(r"Season[ ._-]*\d{1,2}", basename, flags=re.IGNORECASE):
+        return True
+    if re.search(r"S\d{1,2}E\d{1,3}", basename, flags=re.IGNORECASE):
+        return False
+    return bool(re.search(r"(?:^|[ ._\-(])S\d{1,2}(?:$|[ ._\-)])", basename, flags=re.IGNORECASE))
 
 
 def relevant_episodes_for_rules(season_state: SeasonState, rules: dict[str, Any]) -> list[EpisodeState]:
