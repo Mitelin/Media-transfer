@@ -651,7 +651,7 @@ class FinalizerHelperTests(unittest.TestCase):
         self.assertIsNone(plan.temporary_destination_folder)
         self.assertFalse(plan.dry_run)
         self.assertFalse(plan.partial_move)
-        self.assertEqual(plan.move_method, "shutil.move")
+        self.assertEqual(plan.move_method, "rename")
 
     def test_preflight_move_plan_accepts_ready_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -750,7 +750,28 @@ class FinalizerHelperTests(unittest.TestCase):
             self.assertTrue(destination.exists())
             self.assertTrue((destination / "Episode 01.mkv").exists())
 
-    def test_move_season_rolls_back_when_final_rename_fails(self) -> None:
+    def test_move_season_uses_rename_without_shutil_copy_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source" / "Season 01"
+            destination = root / "target" / "Example" / "Season 01"
+            source.mkdir(parents=True)
+            (source / "Episode 01.mkv").write_text("media", encoding="utf-8")
+            original_shutil_move = finalizer.shutil.move
+
+            def failing_shutil_move(current_path: str, target_path: str) -> None:
+                raise AssertionError(f"shutil.move should not be called: {current_path} -> {target_path}")
+
+            finalizer.shutil.move = failing_shutil_move
+            try:
+                finalizer.move_season(str(source), str(destination), {"fail_if_destination_exists": True})
+            finally:
+                finalizer.shutil.move = original_shutil_move
+
+            self.assertFalse(source.exists())
+            self.assertTrue((destination / "Episode 01.mkv").exists())
+
+    def test_move_season_rejects_cross_filesystem_rename_without_copying(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             source = root / "source" / "Season 01"
@@ -759,8 +780,35 @@ class FinalizerHelperTests(unittest.TestCase):
             (source / "Episode 01.mkv").write_text("media", encoding="utf-8")
             original_rename = finalizer.os.rename
 
+            def cross_device_rename(current_path: str, target_path: str) -> None:
+                raise OSError(finalizer.errno.EXDEV, f"cross-device link: {current_path} -> {target_path}")
+
+            finalizer.os.rename = cross_device_rename
+            try:
+                with self.assertRaisesRegex(RuntimeError, "Cannot rename across filesystems"):
+                    finalizer.move_season(str(source), str(destination), {"fail_if_destination_exists": True})
+            finally:
+                finalizer.os.rename = original_rename
+
+            self.assertTrue(source.exists())
+            self.assertFalse(destination.exists())
+
+    def test_move_season_rolls_back_when_final_rename_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source" / "Season 01"
+            destination = root / "target" / "Example" / "Season 01"
+            source.mkdir(parents=True)
+            (source / "Episode 01.mkv").write_text("media", encoding="utf-8")
+            original_rename = finalizer.os.rename
+            rename_calls = 0
+
             def failing_rename(current_path: str, target_path: str) -> None:
-                raise OSError(f"simulated rename failure: {current_path} -> {target_path}")
+                nonlocal rename_calls
+                rename_calls += 1
+                if rename_calls == 2:
+                    raise OSError(f"simulated rename failure: {current_path} -> {target_path}")
+                original_rename(current_path, target_path)
 
             finalizer.os.rename = failing_rename
             try:

@@ -228,6 +228,7 @@ Nejdřív nech `safety.dry_run: true` a ověř logy. Skutečné přesuny a Sonar
 ```yaml
 safety:
   dry_run: false
+  move_method: "rename"
 ```
 
 Potom spusť script s přepínačem:
@@ -250,6 +251,8 @@ destination parent se případně vytvoří
 ```
 
 Pokud preflight najde chybu, script nepřesune soubory, neunmonitoruje epizody a nespustí rescan.
+
+Skutečný přesun používá defaultně `move_method: "rename"`, tedy `os.rename` bez tichého copy fallbacku. Pokud jsou source a target na stejném filesystemu, přesun je rychlý metadata rename. Pokud jsou na různých mount pointech/filesystémech, skript skončí chybou `Cannot rename across filesystems` místo toho, aby udělal drahý copy+delete. Fallback `move_method: "shutil.move"` existuje jen pro vědomé případy, kdy copy+delete opravdu chceš povolit.
 
 Pokud selže skutečný přesun až po přesunutí do temporary cíle nebo před finálním rename, script se pokusí přesunuté soubory nebo složku vrátit zpět na původní místo. Sonarr unmonitoring a rescan se spustí až po úspěšném dokončení move kroku.
 

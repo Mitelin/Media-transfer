@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import logging
 import os
@@ -466,6 +467,10 @@ def validate_config(config: dict[str, Any]) -> tuple[list[str], list[str]]:
         errors.append("safety must be a mapping")
     elif not safety.get("dry_run", True):
         warnings.append("safety.dry_run is false; runtime changes are possible when --execute is used")
+    if isinstance(safety, dict):
+        move_method = str(safety.get("move_method", "rename"))
+        if move_method not in {"rename", "os.rename", "shutil.move"}:
+            errors.append("safety.move_method must be one of: rename, os.rename, shutil.move")
 
     return errors, warnings
 
@@ -1186,7 +1191,7 @@ def build_movie_move_plan(
         destination_folder=destination_folder,
         temporary_destination_folder=temporary_destination_folder,
         dry_run=dry_run,
-        move_method=str(safety.get("move_method", "shutil.move")),
+        move_method=str(safety.get("move_method", "rename")),
         will_move=result.is_final,
         will_unmonitor=result.is_final,
         will_rescan=result.is_final,
@@ -1377,7 +1382,7 @@ def build_move_plan(
         destination_folder=destination,
         temporary_destination_folder=temporary_destination,
         dry_run=dry_run,
-        move_method=str(safety.get("move_method", "shutil.move")),
+        move_method=str(safety.get("move_method", "rename")),
         partial_move=partial_move,
         will_move=bool(move_episodes),
         will_unmonitor=bool(move_episodes),
@@ -1499,7 +1504,7 @@ def build_series_folder_move_plan_if_complete(
         destination_folder=destination,
         temporary_destination_folder=temporary_destination,
         dry_run=dry_run,
-        move_method=str(safety.get("move_method", "shutil.move")),
+        move_method=str(safety.get("move_method", "rename")),
         partial_move=False,
         will_move=bool(all_relevant_episodes),
         will_unmonitor=bool(all_relevant_episodes),
@@ -1624,7 +1629,26 @@ def collect_file_sizes(folder: str) -> dict[str, int]:
     return sizes
 
 
-def rollback_moved_path(current_path: str, original_path: str) -> None:
+def move_path(source: str, destination: str, safety: dict[str, Any]) -> None:
+    move_method = str(safety.get("move_method", "rename"))
+    if move_method in {"rename", "os.rename"}:
+        try:
+            os.rename(source, destination)
+        except OSError as exc:
+            if exc.errno == errno.EXDEV:
+                raise RuntimeError(
+                    f"Cannot rename across filesystems without copy fallback: {source} -> {destination}. "
+                    "Put source and target on the same filesystem or set safety.move_method to 'shutil.move' to allow copy+delete."
+                ) from exc
+            raise
+        return
+    if move_method == "shutil.move":
+        shutil.move(source, destination)
+        return
+    raise ValueError(f"Unsupported move_method: {move_method}")
+
+
+def rollback_moved_path(current_path: str, original_path: str, safety: dict[str, Any]) -> None:
     if not os.path.exists(current_path) or os.path.exists(original_path):
         return
     original_parent = os.path.dirname(original_path)
@@ -1632,14 +1656,14 @@ def rollback_moved_path(current_path: str, original_path: str) -> None:
         os.makedirs(original_parent, exist_ok=True)
     LOG.warning("Rolling back failed move: %s -> %s", current_path, original_path)
     try:
-        shutil.move(current_path, original_path)
+        move_path(current_path, original_path, safety)
     except Exception:
         LOG.exception("Rollback failed for %s -> %s", current_path, original_path)
 
 
-def rollback_move_items(moved_items: list[tuple[MoveItem, str]]) -> None:
+def rollback_move_items(moved_items: list[tuple[MoveItem, str]], safety: dict[str, Any]) -> None:
     for item, current_path in reversed(moved_items):
-        rollback_moved_path(current_path, item.source_path)
+        rollback_moved_path(current_path, item.source_path, safety)
 
 
 def move_season(source: str, destination: str, safety: dict[str, Any]) -> None:
@@ -1657,7 +1681,7 @@ def move_season(source: str, destination: str, safety: dict[str, Any]) -> None:
     source_sizes = collect_file_sizes(source)
     moved_path = temporary_destination
     try:
-        shutil.move(source, temporary_destination)
+        move_path(source, temporary_destination, safety)
         destination_sizes = collect_file_sizes(temporary_destination)
         if source_sizes != destination_sizes:
             raise RuntimeError("Internal move verification failed")
@@ -1665,7 +1689,7 @@ def move_season(source: str, destination: str, safety: dict[str, Any]) -> None:
             os.rename(temporary_destination, destination)
             moved_path = destination
     except Exception:
-        rollback_moved_path(moved_path, source)
+        rollback_moved_path(moved_path, source, safety)
         raise
 
 
@@ -1684,7 +1708,7 @@ def move_episode_files(move_items: list[MoveItem], safety: dict[str, Any]) -> No
             source_size = os.path.getsize(item.source_path)
             move_destination = item.temporary_destination_path or item.destination_path
             moved_path = move_destination
-            shutil.move(item.source_path, move_destination)
+            move_path(item.source_path, move_destination, safety)
             destination_size = os.path.getsize(move_destination)
             if source_size != destination_size:
                 raise RuntimeError(f"Internal move verification failed for {item.source_path}")
@@ -1694,8 +1718,8 @@ def move_episode_files(move_items: list[MoveItem], safety: dict[str, Any]) -> No
             moved_items.append((item, moved_path))
         except Exception:
             if moved_path is not None:
-                rollback_moved_path(moved_path, item.source_path)
-            rollback_move_items(moved_items)
+                rollback_moved_path(moved_path, item.source_path, safety)
+            rollback_move_items(moved_items, safety)
             raise
 
 

@@ -88,6 +88,7 @@ safety:
   skip_specials: true
   min_file_size_mb: 50
   fail_if_destination_exists: true
+  move_method: "rename"
   move_to_temporary_folder_first: true
   temporary_suffix: ".__moving__"
 
