@@ -962,17 +962,18 @@ def evaluate_season_final(
 
     blocking: list[EpisodeState] = []
     target_language = sorted(allowed_audio)[0] if allowed_audio else None
+    short_circuit_on_block = is_physical_season_folder(season_state.source_folder)
 
     if is_specials_complete_rule_enabled(season_state, rules):
         for episode in relevant:
             if require_all_files and not episode.has_file:
                 episode.block_reason = "missing episode file"
                 blocking.append(episode)
-                continue
+                return EvaluationResult(False, target_language, "one or more specials are not downloaded", blocking)
             if not episode.path:
                 episode.block_reason = "missing file path"
                 blocking.append(episode)
-                continue
+                return EvaluationResult(False, target_language, "one or more specials are not downloaded", blocking)
             episode.is_final = True
             episode.language_detection_source = "sonarr-specials-complete"
             LOG.info(
@@ -991,10 +992,14 @@ def evaluate_season_final(
         if require_all_files and not episode.has_file:
             episode.block_reason = "missing episode file"
             blocking.append(episode)
+            if short_circuit_on_block:
+                return EvaluationResult(False, target_language, "one or more episodes are not final", blocking)
             continue
         if not episode.path:
             episode.block_reason = "missing file path"
             blocking.append(episode)
+            if short_circuit_on_block:
+                return EvaluationResult(False, target_language, "one or more episodes are not final", blocking)
             continue
         local_read_path = translate_media_path_for_local_read(episode.path, config, enable_local_mounts)
         if local_read_path != episode.path:
@@ -1014,12 +1019,16 @@ def evaluate_season_final(
             else:
                 episode.block_reason = "file does not exist on disk"
                 blocking.append(episode)
+                if short_circuit_on_block:
+                    return EvaluationResult(False, target_language, "one or more episodes are not final", blocking)
                 continue
         else:
             size_mb = os.path.getsize(local_read_path) / 1024 / 1024
             if min_file_size_mb and size_mb < min_file_size_mb:
                 episode.block_reason = f"file smaller than minimum size {min_file_size_mb:g} MB"
                 blocking.append(episode)
+                if short_circuit_on_block:
+                    return EvaluationResult(False, target_language, "one or more episodes are not final", blocking)
                 continue
 
             episode_languages = detect_file_languages(local_read_path)
@@ -1067,6 +1076,8 @@ def evaluate_season_final(
         if not episode.is_final:
             episode.block_reason = "final language not detected"
             blocking.append(episode)
+            if short_circuit_on_block:
+                return EvaluationResult(False, target_language, "one or more episodes are not final", blocking)
 
     if blocking:
         return EvaluationResult(False, target_language, "one or more episodes are not final", blocking)

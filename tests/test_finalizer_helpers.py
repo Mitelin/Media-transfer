@@ -147,6 +147,100 @@ class FinalizerHelperTests(unittest.TestCase):
         self.assertEqual(season_state.episodes[0].audio_languages, ["en", "jp"])
         self.assertEqual(season_state.episodes[0].language_detection_source, "ffprobe-sonarr-api-merged")
 
+    def test_evaluate_physical_season_stops_after_first_non_final_episode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            season_folder = Path(temp_dir) / "Example" / "Season 01"
+            season_folder.mkdir(parents=True)
+            first_path = season_folder / "Example S01E01.mkv"
+            second_path = season_folder / "Example S01E02.mkv"
+            first_path.write_text("media", encoding="utf-8")
+            second_path.write_text("media", encoding="utf-8")
+            season_state = finalizer.SeasonState(
+                series_id=252,
+                series_title="Example",
+                season_number=1,
+                source_folder=str(season_folder),
+                episodes=[
+                    finalizer.EpisodeState(1, 1, True, True, 101, str(first_path)),
+                    finalizer.EpisodeState(2, 2, True, True, 102, str(second_path)),
+                ],
+            )
+            calls: list[str] = []
+            original_detect_file_languages = finalizer.detect_file_languages
+
+            def detect_once(path: str) -> dict[str, list[str]]:
+                calls.append(path)
+                if len(calls) > 1:
+                    raise AssertionError("physical season should stop after the first non-final episode")
+                return {"audio": ["jp"], "subtitles": []}
+
+            finalizer.detect_file_languages = detect_once
+            try:
+                result = finalizer.evaluate_season_final(
+                    season_state,
+                    {
+                        "allowed_final_audio_languages": ["en"],
+                        "evaluate_monitored_only": True,
+                        "require_all_episode_files": True,
+                    },
+                    {"min_file_size_mb": 0},
+                    {},
+                )
+            finally:
+                finalizer.detect_file_languages = original_detect_file_languages
+
+        self.assertFalse(result.is_final)
+        self.assertEqual(calls, [str(first_path)])
+        self.assertEqual([episode.episode_number for episode in result.blocking_episodes], [1])
+        self.assertFalse(season_state.episodes[1].is_final)
+
+    def test_evaluate_loose_folder_continues_after_non_final_episode_for_partial_move(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_folder = Path(temp_dir) / "Example"
+            source_folder.mkdir()
+            first_path = source_folder / "Example S01E01.mkv"
+            second_path = source_folder / "Example S01E02.mkv"
+            first_path.write_text("media", encoding="utf-8")
+            second_path.write_text("media", encoding="utf-8")
+            season_state = finalizer.SeasonState(
+                series_id=252,
+                series_title="Example",
+                season_number=1,
+                source_folder=str(source_folder),
+                episodes=[
+                    finalizer.EpisodeState(1, 1, True, True, 101, str(first_path)),
+                    finalizer.EpisodeState(2, 2, True, True, 102, str(second_path)),
+                ],
+            )
+            calls: list[str] = []
+            original_detect_file_languages = finalizer.detect_file_languages
+
+            def detect_all(path: str) -> dict[str, list[str]]:
+                calls.append(path)
+                if path == str(first_path):
+                    return {"audio": ["jp"], "subtitles": []}
+                return {"audio": ["en"], "subtitles": []}
+
+            finalizer.detect_file_languages = detect_all
+            try:
+                result = finalizer.evaluate_season_final(
+                    season_state,
+                    {
+                        "allowed_final_audio_languages": ["en"],
+                        "evaluate_monitored_only": True,
+                        "require_all_episode_files": True,
+                    },
+                    {"min_file_size_mb": 0},
+                    {},
+                )
+            finally:
+                finalizer.detect_file_languages = original_detect_file_languages
+
+        self.assertFalse(result.is_final)
+        self.assertEqual(calls, [str(first_path), str(second_path)])
+        self.assertFalse(season_state.episodes[0].is_final)
+        self.assertTrue(season_state.episodes[1].is_final)
+
     def test_evaluate_specials_final_uses_sonarr_download_completion_without_language(self) -> None:
         season_state = finalizer.SeasonState(
             series_id=252,
