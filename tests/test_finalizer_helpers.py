@@ -927,86 +927,84 @@ class FinalizerHelperTests(unittest.TestCase):
             self.assertTrue((destination / subtitle.name).exists())
             self.assertTrue(unrelated_subtitle.exists())
 
-    def test_build_series_folder_move_plan_when_all_source_seasons_are_final(self) -> None:
-        series = {"title": "Test", "path": "/tv-en/Test"}
-        episodes = [
-            {"id": 101, "episodeNumber": 1, "seasonNumber": 1, "monitored": True, "hasFile": True, "episodeFileId": 1001},
-            {"id": 201, "episodeNumber": 1, "seasonNumber": 2, "monitored": True, "hasFile": True, "episodeFileId": 2001},
-        ]
-        episode_files = [
-            {"id": 1001, "path": "/tv-en/Test/Season 01/Test S01E01.mkv", "languages": [{"name": "Czech"}]},
-            {"id": 2001, "path": "/tv-en/Test/Season 02/Test S02E01.mkv", "languages": [{"name": "Czech"}]},
-        ]
-        current_state = finalizer.build_season_state(
-            series,
-            episodes,
-            episode_files,
-            finalizer.EventContext("Download", 42, None, None, 2, None, None),
-        )
-        rules = {"allowed_final_audio_languages": ["cz"], "evaluate_monitored_only": True, "allow_sonarr_language_fallback": True}
-        safety = {"min_file_size_mb": 0, "move_to_temporary_folder_first": True, "temporary_suffix": ".__moving__"}
-        result = finalizer.evaluate_season_final(current_state, rules, safety, {})
+    def test_cleanup_empty_source_parent_removes_empty_series_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_prefix = root / "anime-jp"
+            target_prefix = root / "anime-en"
+            source_season = source_prefix / "Test" / "Season 02"
+            destination_season = target_prefix / "Test" / "Season 02"
+            source_season.mkdir(parents=True)
+            (source_season / "Test S02E01.mkv").write_text("media", encoding="utf-8")
+            plan = finalizer.MovePlan(
+                series_id=42,
+                series_title="Test",
+                season_number=2,
+                mapping_name="anime",
+                target_language="en",
+                source_folder=str(source_season),
+                destination_folder=str(destination_season),
+                temporary_destination_folder=str(destination_season) + ".__moving__",
+                dry_run=False,
+                move_method="rename",
+                partial_move=False,
+                will_move=True,
+                will_unmonitor=True,
+                will_rescan=True,
+                unmonitor_season_number=2,
+                unmonitor_episode_ids=[201],
+                move_items=[],
+                episode_count=1,
+                relevant_episode_count=1,
+                episode_file_count=1,
+            )
 
-        plan = finalizer.build_series_folder_move_plan_if_complete(
-            series,
-            episodes,
-            episode_files,
-            current_state,
-            result,
-            {"name": "tv", "source_prefix": "/tv-en", "target_prefix": "/tv-cz"},
-            rules,
-            safety,
-            {},
-            False,
-            True,
-        )
+            finalizer.move_season(plan.source_folder, plan.destination_folder, {"fail_if_destination_exists": True})
+            finalizer.cleanup_empty_source_parent(plan, {"source_prefix": str(source_prefix)})
 
-        self.assertIsNotNone(plan)
-        assert plan is not None
-        self.assertEqual(plan.move_scope, "series")
-        self.assertEqual(plan.source_folder, "/tv-en/Test")
-        self.assertEqual(plan.destination_folder, "/tv-cz/Test")
-        self.assertEqual(plan.temporary_destination_folder, "/tv-cz/Test.__moving__")
-        self.assertEqual(plan.unmonitor_season_numbers, [1, 2])
-        self.assertEqual(plan.unmonitor_episode_ids, [101, 201])
+            self.assertFalse((source_prefix / "Test").exists())
+            self.assertTrue((destination_season / "Test S02E01.mkv").exists())
 
-    def test_build_series_folder_move_plan_blocks_in_progress_source_season(self) -> None:
-        series = {"title": "Test", "path": "/tv-en/Test"}
-        episodes = [
-            {"id": 101, "episodeNumber": 1, "seasonNumber": 1, "monitored": True, "hasFile": True, "episodeFileId": 1001},
-            {"id": 201, "episodeNumber": 1, "seasonNumber": 2, "monitored": True, "hasFile": True, "episodeFileId": 2001},
-            {"id": 301, "episodeNumber": 1, "seasonNumber": 3, "monitored": True, "hasFile": True, "episodeFileId": 3001},
-        ]
-        episode_files = [
-            {"id": 1001, "path": "/tv-en/Test/Season 01/Test S01E01.mkv", "languages": [{"name": "Czech"}]},
-            {"id": 2001, "path": "/tv-en/Test/Season 02/Test S02E01.mkv", "languages": [{"name": "Czech"}]},
-            {"id": 3001, "path": "/tv-en/Test/Season 03/Test S03E01.mkv", "languages": [{"name": "English"}]},
-        ]
-        current_state = finalizer.build_season_state(
-            series,
-            episodes,
-            episode_files,
-            finalizer.EventContext("Download", 42, None, None, 2, None, None),
-        )
-        rules = {"allowed_final_audio_languages": ["cz"], "evaluate_monitored_only": True, "allow_sonarr_language_fallback": True}
-        safety = {"min_file_size_mb": 0, "move_to_temporary_folder_first": True, "temporary_suffix": ".__moving__"}
-        result = finalizer.evaluate_season_final(current_state, rules, safety, {})
+    def test_cleanup_empty_source_parent_keeps_series_folder_with_remaining_season(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_prefix = root / "anime-jp"
+            target_prefix = root / "anime-en"
+            source_season = source_prefix / "Test" / "Season 02"
+            remaining_season = source_prefix / "Test" / "Season 03"
+            destination_season = target_prefix / "Test" / "Season 02"
+            source_season.mkdir(parents=True)
+            remaining_season.mkdir(parents=True)
+            (source_season / "Test S02E01.mkv").write_text("media", encoding="utf-8")
+            (remaining_season / "Test S03E01.mkv").write_text("media", encoding="utf-8")
+            plan = finalizer.MovePlan(
+                series_id=42,
+                series_title="Test",
+                season_number=2,
+                mapping_name="anime",
+                target_language="en",
+                source_folder=str(source_season),
+                destination_folder=str(destination_season),
+                temporary_destination_folder=str(destination_season) + ".__moving__",
+                dry_run=False,
+                move_method="rename",
+                partial_move=False,
+                will_move=True,
+                will_unmonitor=True,
+                will_rescan=True,
+                unmonitor_season_number=2,
+                unmonitor_episode_ids=[201],
+                move_items=[],
+                episode_count=1,
+                relevant_episode_count=1,
+                episode_file_count=1,
+            )
 
-        plan = finalizer.build_series_folder_move_plan_if_complete(
-            series,
-            episodes,
-            episode_files,
-            current_state,
-            result,
-            {"name": "tv", "source_prefix": "/tv-en", "target_prefix": "/tv-cz"},
-            rules,
-            safety,
-            {},
-            False,
-            True,
-        )
+            finalizer.move_season(plan.source_folder, plan.destination_folder, {"fail_if_destination_exists": True})
+            finalizer.cleanup_empty_source_parent(plan, {"source_prefix": str(source_prefix)})
 
-        self.assertIsNone(plan)
+            self.assertTrue((source_prefix / "Test").exists())
+            self.assertTrue((remaining_season / "Test S03E01.mkv").exists())
 
     def test_build_movie_move_plan_moves_whole_movie_folder(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
