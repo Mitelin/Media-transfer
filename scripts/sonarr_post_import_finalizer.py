@@ -949,11 +949,10 @@ def evaluate_season_final(
 ) -> EvaluationResult:
     allowed_audio = set(rules.get("allowed_final_audio_languages") or [])
     allow_subtitles = bool(rules.get("allow_subtitle_as_final", False))
-    evaluate_monitored_only = bool(rules.get("evaluate_monitored_only", True))
     require_all_files = bool(rules.get("require_all_episode_files", True))
     allow_sonarr_fallback = bool(rules.get("allow_sonarr_language_fallback", True))
     min_file_size_mb = float(safety.get("min_file_size_mb", 0) or 0)
-    relevant = [episode for episode in season_state.episodes if episode.monitored or not evaluate_monitored_only]
+    relevant = relevant_episodes_for_rules(season_state, rules)
 
     if not relevant:
         return EvaluationResult(False, None, "no relevant episodes to evaluate", [])
@@ -1290,6 +1289,8 @@ def is_physical_season_folder(path: str | None) -> bool:
 
 
 def relevant_episodes_for_rules(season_state: SeasonState, rules: dict[str, Any]) -> list[EpisodeState]:
+    if is_specials_complete_rule_enabled(season_state, rules):
+        return [episode for episode in season_state.episodes if episode.monitored]
     evaluate_monitored_only = bool(rules.get("evaluate_monitored_only", True))
     return [episode for episode in season_state.episodes if episode.monitored or not evaluate_monitored_only]
 
@@ -1381,7 +1382,7 @@ def build_move_plan(
         will_move=bool(move_episodes),
         will_unmonitor=bool(move_episodes),
         will_rescan=True,
-        unmonitor_season_number=None if partial_move else season_state.season_number,
+        unmonitor_season_number=None if partial_move or is_specials_complete_rule_enabled(season_state, rules) else season_state.season_number,
         unmonitor_episode_ids=[episode.episode_id for episode in move_episodes],
         move_items=move_items,
         episode_count=len(season_state.episodes),

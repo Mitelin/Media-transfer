@@ -170,6 +170,14 @@ class FinalizerHelperTests(unittest.TestCase):
                     episode_file_id=102,
                     path="/anime-jp/Example Specials/Season 00/OVA 02.mkv",
                 ),
+                finalizer.EpisodeState(
+                    episode_id=3,
+                    episode_number=3,
+                    monitored=False,
+                    has_file=False,
+                    episode_file_id=None,
+                    path=None,
+                ),
             ],
         )
 
@@ -177,7 +185,7 @@ class FinalizerHelperTests(unittest.TestCase):
             season_state,
             {
                 "allowed_final_audio_languages": ["en"],
-                "evaluate_monitored_only": True,
+                "evaluate_monitored_only": False,
                 "require_all_episode_files": True,
                 "move_specials_when_complete": True,
             },
@@ -187,8 +195,31 @@ class FinalizerHelperTests(unittest.TestCase):
 
         self.assertTrue(result.is_final)
         self.assertEqual(result.reason, "all relevant specials are downloaded")
-        self.assertTrue(all(episode.is_final for episode in season_state.episodes))
-        self.assertEqual([episode.language_detection_source for episode in season_state.episodes], ["sonarr-specials-complete", "sonarr-specials-complete"])
+        self.assertTrue(all(episode.is_final for episode in season_state.episodes[:2]))
+        self.assertFalse(season_state.episodes[2].is_final)
+        self.assertEqual(
+            [episode.language_detection_source for episode in season_state.episodes[:2]],
+            ["sonarr-specials-complete", "sonarr-specials-complete"],
+        )
+
+        plan = finalizer.build_move_plan(
+            season_state,
+            {"name": "anime", "source_prefix": "/anime-jp", "target_prefix": "/anime-en"},
+            "/anime-en/Example Specials/Season 00",
+            result,
+            {
+                "allowed_final_audio_languages": ["en"],
+                "evaluate_monitored_only": False,
+                "require_all_episode_files": True,
+                "move_specials_when_complete": True,
+            },
+            {"move_to_temporary_folder_first": True, "temporary_suffix": ".__moving__"},
+            dry_run=True,
+        )
+
+        self.assertIsNone(plan.unmonitor_season_number)
+        self.assertEqual(plan.unmonitor_episode_ids, [1, 2])
+        self.assertEqual(plan.relevant_episode_count, 2)
 
     def test_evaluate_specials_final_blocks_missing_sonarr_file(self) -> None:
         season_state = finalizer.SeasonState(
