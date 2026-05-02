@@ -147,6 +147,91 @@ class FinalizerHelperTests(unittest.TestCase):
         self.assertEqual(season_state.episodes[0].audio_languages, ["en", "jp"])
         self.assertEqual(season_state.episodes[0].language_detection_source, "ffprobe-sonarr-api-merged")
 
+    def test_evaluate_specials_final_uses_sonarr_download_completion_without_language(self) -> None:
+        season_state = finalizer.SeasonState(
+            series_id=252,
+            series_title="Example Specials",
+            season_number=0,
+            source_folder="/anime-jp/Example Specials/Season 00",
+            episodes=[
+                finalizer.EpisodeState(
+                    episode_id=1,
+                    episode_number=1,
+                    monitored=True,
+                    has_file=True,
+                    episode_file_id=101,
+                    path="/anime-jp/Example Specials/Season 00/OVA 01.mkv",
+                ),
+                finalizer.EpisodeState(
+                    episode_id=2,
+                    episode_number=2,
+                    monitored=True,
+                    has_file=True,
+                    episode_file_id=102,
+                    path="/anime-jp/Example Specials/Season 00/OVA 02.mkv",
+                ),
+            ],
+        )
+
+        result = finalizer.evaluate_season_final(
+            season_state,
+            {
+                "allowed_final_audio_languages": ["en"],
+                "evaluate_monitored_only": True,
+                "require_all_episode_files": True,
+                "move_specials_when_complete": True,
+            },
+            {"min_file_size_mb": 0},
+            {},
+        )
+
+        self.assertTrue(result.is_final)
+        self.assertEqual(result.reason, "all relevant specials are downloaded")
+        self.assertTrue(all(episode.is_final for episode in season_state.episodes))
+        self.assertEqual([episode.language_detection_source for episode in season_state.episodes], ["sonarr-specials-complete", "sonarr-specials-complete"])
+
+    def test_evaluate_specials_final_blocks_missing_sonarr_file(self) -> None:
+        season_state = finalizer.SeasonState(
+            series_id=252,
+            series_title="Example Specials",
+            season_number=0,
+            source_folder="/anime-jp/Example Specials/Season 00",
+            episodes=[
+                finalizer.EpisodeState(
+                    episode_id=1,
+                    episode_number=1,
+                    monitored=True,
+                    has_file=True,
+                    episode_file_id=101,
+                    path="/anime-jp/Example Specials/Season 00/OVA 01.mkv",
+                ),
+                finalizer.EpisodeState(
+                    episode_id=2,
+                    episode_number=2,
+                    monitored=True,
+                    has_file=False,
+                    episode_file_id=None,
+                    path=None,
+                ),
+            ],
+        )
+
+        result = finalizer.evaluate_season_final(
+            season_state,
+            {
+                "allowed_final_audio_languages": ["en"],
+                "evaluate_monitored_only": True,
+                "require_all_episode_files": True,
+                "move_specials_when_complete": True,
+            },
+            {"min_file_size_mb": 0},
+            {},
+        )
+
+        self.assertFalse(result.is_final)
+        self.assertEqual(result.reason, "one or more specials are not downloaded")
+        self.assertEqual([episode.episode_number for episode in result.blocking_episodes], [2])
+
     def test_evaluate_movie_final_uses_radarr_language_fallback(self) -> None:
         movie_state = finalizer.MovieState(
             movie_id=77,

@@ -961,6 +961,30 @@ def evaluate_season_final(
     blocking: list[EpisodeState] = []
     target_language = sorted(allowed_audio)[0] if allowed_audio else None
 
+    if is_specials_complete_rule_enabled(season_state, rules):
+        for episode in relevant:
+            if require_all_files and not episode.has_file:
+                episode.block_reason = "missing episode file"
+                blocking.append(episode)
+                continue
+            if not episode.path:
+                episode.block_reason = "missing file path"
+                blocking.append(episode)
+                continue
+            episode.is_final = True
+            episode.language_detection_source = "sonarr-specials-complete"
+            LOG.info(
+                "Specials episode %s file=%s source=%s downloaded=%s final=%s",
+                episode.episode_number,
+                episode.path,
+                episode.language_detection_source,
+                episode.has_file,
+                episode.is_final,
+            )
+        if blocking:
+            return EvaluationResult(False, target_language, "one or more specials are not downloaded", blocking)
+        return EvaluationResult(True, target_language, "all relevant specials are downloaded", [])
+
     for episode in relevant:
         if require_all_files and not episode.has_file:
             episode.block_reason = "missing episode file"
@@ -1045,6 +1069,10 @@ def evaluate_season_final(
     if blocking:
         return EvaluationResult(False, target_language, "one or more episodes are not final", blocking)
     return EvaluationResult(True, target_language, "all relevant episodes are final", [])
+
+
+def is_specials_complete_rule_enabled(season_state: SeasonState, rules: dict[str, Any]) -> bool:
+    return season_state.season_number == 0 and bool(rules.get("move_specials_when_complete", True))
 
 
 def build_movie_state(movie: dict[str, Any], movie_file: dict[str, Any] | None, context: MovieEventContext) -> MovieState:
@@ -1863,13 +1891,13 @@ def main() -> int:
     if context.season_number is None:
         LOG.error("Could not determine season number")
         return 2
-    if context.season_number == 0 and safety.get("skip_specials", True):
-        LOG.info("Skipping specials season 0")
-        return 0
 
     rules_by_type = config.get("rules", {})
     instance_type = str(instance_config.get("instance_type"))
     rules = rules_by_type.get(instance_type, {})
+    if context.season_number == 0 and safety.get("skip_specials", True) and not rules.get("move_specials_when_complete", True):
+        LOG.info("Skipping specials season 0")
+        return 0
     season_state = build_season_state(series, episodes, episode_files, context)
     LOG.info(
         "Season state: series=%s season=%s source=%s episodes=%s",

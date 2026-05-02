@@ -62,6 +62,7 @@ rules:
     evaluate_monitored_only: true
     allow_subtitle_as_final: false
     allow_sonarr_language_fallback: true
+    move_specials_when_complete: true
 
   anime:
     allowed_final_audio_languages:
@@ -70,6 +71,7 @@ rules:
     evaluate_monitored_only: true
     allow_subtitle_as_final: false
     allow_sonarr_language_fallback: true
+    move_specials_when_complete: true
 
   movie:
     allowed_final_audio_languages:
