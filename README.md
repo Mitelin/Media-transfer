@@ -304,3 +304,22 @@ V Radarr Movies Custom Script nastav cestu:
 ```
 
 Wrappery používají `--url-mode docker` a nepoužívají `--enable-local-mounts`. V Sonarr containeru musí být dostupné `python3`, Python balíčky z `requirements.txt` a `ffprobe`.
+
+## 6. Control Panel Update
+
+Webový control panel má nově tlačítko `Update app`. Tlačítko udělá `git fetch`, zkontroluje, jestli je lokální branch pozadu za upstream, a jen při dostupné nové verzi provede `git pull --ff-only`. Pokud je working tree dirty, branch diverged nebo chybí upstream, update se bezpečně neprovede.
+
+Po úspěšném update se panel sám restartuje přes systemd. Název restartované služby se dá změnit proměnnou:
+
+```text
+CONTROL_PANEL_APP_SERVICE=media-transfer-control-panel.service
+```
+
+Pokud je potřeba přepsat cestu ke git repozitáři nebo remote, použij:
+
+```text
+CONTROL_PANEL_REPO_DIR=/srv/media-transfer
+CONTROL_PANEL_GIT_REMOTE=origin
+```
+
+Tlačítko `Update app` je během běžící maintenance úlohy zablokované, aby update neproběhl uprostřed přesunu.

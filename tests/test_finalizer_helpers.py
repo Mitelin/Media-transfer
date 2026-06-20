@@ -315,7 +315,7 @@ class FinalizerHelperTests(unittest.TestCase):
         self.assertEqual(plan.unmonitor_episode_ids, [1, 2])
         self.assertEqual(plan.relevant_episode_count, 2)
 
-    def test_evaluate_specials_final_blocks_missing_sonarr_file(self) -> None:
+    def test_evaluate_specials_final_moves_downloaded_files_without_completeness_check(self) -> None:
         season_state = finalizer.SeasonState(
             series_id=252,
             series_title="Example Specials",
@@ -354,8 +354,89 @@ class FinalizerHelperTests(unittest.TestCase):
         )
 
         self.assertFalse(result.is_final)
-        self.assertEqual(result.reason, "one or more specials are not downloaded")
+        self.assertEqual(result.reason, "moving downloaded specials without completeness check")
         self.assertEqual([episode.episode_number for episode in result.blocking_episodes], [2])
+        self.assertTrue(season_state.episodes[0].is_final)
+        self.assertFalse(season_state.episodes[1].is_final)
+
+        plan = finalizer.build_move_plan(
+            season_state,
+            {"name": "anime", "source_prefix": "/anime-jp", "target_prefix": "/anime-en"},
+            "/anime-en/Example Specials/Season 00",
+            result,
+            {
+                "allowed_final_audio_languages": ["en"],
+                "evaluate_monitored_only": True,
+                "require_all_episode_files": True,
+                "move_specials_when_complete": True,
+            },
+            {"move_to_temporary_folder_first": True, "temporary_suffix": ".__moving__"},
+            dry_run=True,
+        )
+
+        self.assertTrue(plan.partial_move)
+        self.assertIsNone(plan.unmonitor_season_number)
+        self.assertEqual(plan.unmonitor_episode_ids, [1])
+
+    def test_evaluate_specials_final_uses_season_00_path_even_when_season_number_mismatches(self) -> None:
+        season_state = finalizer.SeasonState(
+            series_id=252,
+            series_title="Example Specials",
+            season_number=1,
+            source_folder="/anime-jp/Example Specials/Season 00",
+            episodes=[
+                finalizer.EpisodeState(
+                    episode_id=1,
+                    episode_number=1,
+                    monitored=True,
+                    has_file=True,
+                    episode_file_id=101,
+                    path="/anime-jp/Example Specials/Season 00/OVA 01.mkv",
+                ),
+                finalizer.EpisodeState(
+                    episode_id=2,
+                    episode_number=2,
+                    monitored=True,
+                    has_file=True,
+                    episode_file_id=102,
+                    path="/anime-jp/Example Specials/Season 00/OVA 02.mkv",
+                ),
+            ],
+        )
+
+        result = finalizer.evaluate_season_final(
+            season_state,
+            {
+                "allowed_final_audio_languages": ["en"],
+                "evaluate_monitored_only": True,
+                "require_all_episode_files": True,
+                "move_specials_when_complete": True,
+            },
+            {"min_file_size_mb": 0},
+            {},
+        )
+
+        self.assertTrue(result.is_final)
+        self.assertEqual(result.reason, "all relevant specials are downloaded")
+        self.assertTrue(all(episode.is_final for episode in season_state.episodes))
+
+        plan = finalizer.build_move_plan(
+            season_state,
+            {"name": "anime", "source_prefix": "/anime-jp", "target_prefix": "/anime-en"},
+            "/anime-en/Example Specials/Season 00",
+            result,
+            {
+                "allowed_final_audio_languages": ["en"],
+                "evaluate_monitored_only": True,
+                "require_all_episode_files": True,
+                "move_specials_when_complete": True,
+            },
+            {"move_to_temporary_folder_first": True, "temporary_suffix": ".__moving__"},
+            dry_run=True,
+        )
+
+        self.assertIsNone(plan.unmonitor_season_number)
+        self.assertEqual(plan.unmonitor_episode_ids, [1, 2])
 
     def test_evaluate_movie_final_uses_radarr_language_fallback(self) -> None:
         movie_state = finalizer.MovieState(
@@ -1303,6 +1384,45 @@ class FinalizerHelperTests(unittest.TestCase):
         finalizer.unmonitor_after_move(client, plan)
 
         self.assertEqual(client.calls, [("episodes", [1])])
+
+    def test_unmonitor_after_specials_move_unmonitors_only_episode_ids(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, int | list[int]]] = []
+
+            def unmonitor_season(self, series_id: int, season_number: int) -> None:
+                self.calls.append(("season", season_number))
+
+            def unmonitor_episodes(self, episode_ids: list[int]) -> None:
+                self.calls.append(("episodes", episode_ids))
+
+        plan = finalizer.MovePlan(
+            series_id=42,
+            series_title="Example Specials",
+            season_number=0,
+            mapping_name="anime",
+            target_language="en",
+            source_folder="/anime-jp/Example Specials/Season 00",
+            destination_folder="/anime-en/Example Specials/Season 00",
+            temporary_destination_folder=None,
+            dry_run=False,
+            move_method="shutil.move",
+            partial_move=False,
+            will_move=True,
+            will_unmonitor=True,
+            will_rescan=True,
+            unmonitor_season_number=None,
+            unmonitor_episode_ids=[1, 2],
+            move_items=[],
+            episode_count=2,
+            relevant_episode_count=2,
+            episode_file_count=2,
+        )
+        client = FakeClient()
+
+        finalizer.unmonitor_after_move(client, plan)
+
+        self.assertEqual(client.calls, [("episodes", [1, 2])])
 
 
 if __name__ == "__main__":

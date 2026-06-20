@@ -619,6 +619,12 @@ def infer_season_from_path(path: str | None) -> int | None:
     return None
 
 
+def is_specials_season_identifier(season_number: int | None, path: str | None = None) -> bool:
+    if season_number == 0:
+        return True
+    return infer_season_from_path(path) == 0
+
+
 def build_event_context(env: dict[str, str]) -> EventContext:
     imported_file_path = env.get("sonarr_episodefile_path") or env.get("sonarr_episodefile_relativepath")
     season_number = infer_season_from_path(imported_file_path)
@@ -965,17 +971,19 @@ def evaluate_season_final(
     short_circuit_on_block = is_physical_season_folder(season_state.source_folder)
 
     if is_specials_complete_rule_enabled(season_state, rules):
+        moved_specials = 0
         for episode in relevant:
-            if require_all_files and not episode.has_file:
+            if not episode.has_file:
                 episode.block_reason = "missing episode file"
                 blocking.append(episode)
-                return EvaluationResult(False, target_language, "one or more specials are not downloaded", blocking)
+                continue
             if not episode.path:
                 episode.block_reason = "missing file path"
                 blocking.append(episode)
-                return EvaluationResult(False, target_language, "one or more specials are not downloaded", blocking)
+                continue
             episode.is_final = True
             episode.language_detection_source = "sonarr-specials-complete"
+            moved_specials += 1
             LOG.info(
                 "Specials episode %s file=%s source=%s downloaded=%s final=%s",
                 episode.episode_number,
@@ -984,8 +992,10 @@ def evaluate_season_final(
                 episode.has_file,
                 episode.is_final,
             )
+        if blocking and moved_specials:
+            return EvaluationResult(False, target_language, "moving downloaded specials without completeness check", blocking)
         if blocking:
-            return EvaluationResult(False, target_language, "one or more specials are not downloaded", blocking)
+            return EvaluationResult(False, target_language, "no specials are downloaded yet", blocking)
         return EvaluationResult(True, target_language, "all relevant specials are downloaded", [])
 
     for episode in relevant:
@@ -1085,7 +1095,11 @@ def evaluate_season_final(
 
 
 def is_specials_complete_rule_enabled(season_state: SeasonState, rules: dict[str, Any]) -> bool:
-    return season_state.season_number == 0 and bool(rules.get("move_specials_when_complete", True))
+    if not bool(rules.get("move_specials_when_complete", True)):
+        return False
+    if is_specials_season_identifier(season_state.season_number, season_state.source_folder):
+        return True
+    return any(is_specials_season_identifier(None, episode.path) for episode in season_state.episodes if episode.path)
 
 
 def build_movie_state(movie: dict[str, Any], movie_file: dict[str, Any] | None, context: MovieEventContext) -> MovieState:
@@ -1877,14 +1891,24 @@ def main() -> int:
         LOG.error("Cannot determine source season folder")
         return 2
     if not result.is_final:
+        specials_bypass = is_specials_complete_rule_enabled(season_state, rules)
         missing_episodes = missing_required_episodes(season_state, rules)
         if missing_episodes:
-            LOG.info(
-                "Season has monitored/relevant missing episodes. Treating as in-progress and not moving anything: %s",
-                [episode.episode_number for episode in missing_episodes],
-            )
-            return 0
-        if is_physical_season_folder(season_state.source_folder):
+            if specials_bypass and movable_final_episodes(season_state, rules):
+                LOG.info(
+                    "Specials season is incomplete, but moving downloaded specials without completeness check: %s",
+                    [episode.episode_number for episode in missing_episodes],
+                )
+            elif specials_bypass:
+                LOG.info("Specials season has no downloaded files yet. Nothing to do.")
+                return 0
+            else:
+                LOG.info(
+                    "Season has monitored/relevant missing episodes. Treating as in-progress and not moving anything: %s",
+                    [episode.episode_number for episode in missing_episodes],
+                )
+                return 0
+        if is_physical_season_folder(season_state.source_folder) and not specials_bypass:
             LOG.info("Season folder is not fully final yet. Nothing to do.")
             return 0
         if not movable_final_episodes(season_state, rules):
