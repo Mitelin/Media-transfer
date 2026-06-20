@@ -1450,7 +1450,7 @@ def unmonitor_after_move(client: SonarrClient, plan: MovePlan) -> None:
 
 
 def source_parent_cleanup_path(plan: MovePlan, mapping: dict[str, Any]) -> str | None:
-    if plan.partial_move or not plan.source_folder or not is_physical_season_folder(plan.source_folder):
+    if not plan.source_folder or not is_physical_season_folder(plan.source_folder):
         return None
     parent = media_dirname(plan.source_folder)
     source_prefix = str(mapping.get("source_prefix", ""))
@@ -1461,28 +1461,35 @@ def source_parent_cleanup_path(plan: MovePlan, mapping: dict[str, Any]) -> str |
     return parent
 
 
+def remove_dir_if_empty(path: str, missing_message: str) -> bool:
+    if not os.path.isdir(path):
+        LOG.info(missing_message, path)
+        return False
+    with os.scandir(path) as entries:
+        if any(True for _ in entries):
+            LOG.info("Folder is not empty, keeping it: %s", path)
+            return False
+    try:
+        os.rmdir(path)
+    except FileNotFoundError:
+        LOG.info(missing_message, path)
+        return False
+    except OSError as exc:
+        if exc.errno in {errno.ENOTEMPTY, errno.EEXIST}:
+            LOG.info("Folder is not empty, keeping it: %s", path)
+            return False
+        raise
+    LOG.info("Removed empty folder: %s", path)
+    return True
+
+
 def cleanup_empty_source_parent(plan: MovePlan, mapping: dict[str, Any]) -> None:
+    if plan.partial_move and plan.source_folder and is_physical_season_folder(plan.source_folder):
+        remove_dir_if_empty(plan.source_folder, "Source season folder already gone or not a directory: %s")
     parent = source_parent_cleanup_path(plan, mapping)
     if not parent:
         return
-    if not os.path.isdir(parent):
-        LOG.info("Source parent folder already gone or not a directory: %s", parent)
-        return
-    with os.scandir(parent) as entries:
-        if any(True for _ in entries):
-            LOG.info("Source parent folder is not empty, keeping it: %s", parent)
-            return
-    try:
-        os.rmdir(parent)
-    except FileNotFoundError:
-        LOG.info("Source parent folder already gone: %s", parent)
-    except OSError as exc:
-        if exc.errno in {errno.ENOTEMPTY, errno.EEXIST}:
-            LOG.info("Source parent folder is not empty, keeping it: %s", parent)
-            return
-        raise
-    else:
-        LOG.info("Removed empty source parent folder: %s", parent)
+    remove_dir_if_empty(parent, "Source parent folder already gone or not a directory: %s")
 
 
 def log_source_parent_cleanup_plan(plan: MovePlan, mapping: dict[str, Any]) -> None:

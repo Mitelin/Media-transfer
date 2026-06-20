@@ -1225,6 +1225,54 @@ class FinalizerHelperTests(unittest.TestCase):
             self.assertTrue(leftover.exists())
             self.assertTrue((destination_season / "Test S02E01.mkv").exists())
 
+    def test_cleanup_empty_source_parent_removes_empty_specials_tree_after_partial_move(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_prefix = root / "anime-jp"
+            target_prefix = root / "anime-en"
+            source_series = source_prefix / "Example Specials"
+            source_season = source_series / "Season 00"
+            destination_season = target_prefix / "Example Specials" / "Season 00"
+            source_season.mkdir(parents=True)
+            source_file = source_season / "OVA 01.mkv"
+            source_file.write_text("media", encoding="utf-8")
+            item = finalizer.MoveItem(
+                episode_id=1,
+                episode_number=1,
+                source_path=str(source_file),
+                destination_path=str(destination_season / "OVA 01.mkv"),
+                temporary_destination_path=str(destination_season / "OVA 01.mkv") + ".__moving__",
+            )
+            plan = finalizer.MovePlan(
+                series_id=42,
+                series_title="Example Specials",
+                season_number=0,
+                mapping_name="anime",
+                target_language="en",
+                source_folder=str(source_season),
+                destination_folder=str(destination_season),
+                temporary_destination_folder=None,
+                dry_run=False,
+                move_method="rename",
+                partial_move=True,
+                will_move=True,
+                will_unmonitor=True,
+                will_rescan=True,
+                unmonitor_season_number=None,
+                unmonitor_episode_ids=[1],
+                move_items=[item],
+                episode_count=1,
+                relevant_episode_count=1,
+                episode_file_count=1,
+            )
+
+            finalizer.move_episode_files([item], {"fail_if_destination_exists": True})
+            finalizer.cleanup_empty_source_parent(plan, {"source_prefix": str(source_prefix)})
+
+            self.assertFalse(source_season.exists())
+            self.assertFalse(source_series.exists())
+            self.assertTrue((destination_season / "OVA 01.mkv").exists())
+
     def test_build_movie_move_plan_moves_whole_movie_folder(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
