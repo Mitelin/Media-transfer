@@ -104,6 +104,30 @@ class FinalizerHelperTests(unittest.TestCase):
         self.assertEqual(season_state.source_folder, "/anime-jp/Bookworm/Season 04")
         self.assertEqual([episode.episode_number for episode in season_state.episodes], [37, 38])
 
+    def test_build_season_state_collapses_nested_specials_import_to_season_root(self) -> None:
+        series = {"title": "Example Specials"}
+        episodes = [
+            {"id": 1, "episodeNumber": 1, "seasonNumber": 0, "monitored": True, "hasFile": True, "episodeFileId": 101},
+            {"id": 2, "episodeNumber": 2, "seasonNumber": 0, "monitored": True, "hasFile": True, "episodeFileId": 102},
+        ]
+        episode_files = [
+            {"id": 101, "path": "/anime-jp/Example Specials/Season 00/Subgroup/OVA 01.mkv"},
+            {"id": 102, "path": "/anime-jp/Example Specials/Season 00/OVA 02.mkv"},
+        ]
+        context = finalizer.EventContext(
+            event_type="Download",
+            series_id=252,
+            series_title=None,
+            series_path=None,
+            season_number=0,
+            imported_file_path="/anime-jp/Example Specials/Season 00/Subgroup/OVA 01.mkv",
+            episode_file_id=101,
+        )
+
+        season_state = finalizer.build_season_state(series, episodes, episode_files, context)
+
+        self.assertEqual(season_state.source_folder, "/anime-jp/Example Specials/Season 00")
+
     def test_evaluate_season_final_can_merge_sonarr_languages_with_ffprobe(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             media_path = Path(temp_dir) / "Bookworm S04E03.mkv"

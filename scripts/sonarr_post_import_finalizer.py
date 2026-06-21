@@ -900,6 +900,17 @@ def choose_source_folder(imported_file_path: str | None, candidates: list[str]) 
     if imported_file_path:
         imported_parent = media_dirname(imported_file_path)
         if imported_parent:
+            imported_season = infer_season_from_path(imported_parent)
+            if imported_season is not None and candidates:
+                matching_candidates = [candidate for candidate in candidates if infer_season_from_path(candidate) == imported_season]
+                if matching_candidates:
+                    season_candidates = [imported_parent, *matching_candidates]
+                    try:
+                        if all(is_posix_media_path(candidate) for candidate in season_candidates):
+                            return posixpath.commonpath(season_candidates)
+                        return os.path.commonpath(season_candidates)
+                    except ValueError:
+                        return matching_candidates[0]
             return imported_parent
     if not candidates:
         return None
