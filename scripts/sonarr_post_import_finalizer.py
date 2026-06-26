@@ -1443,11 +1443,21 @@ def build_move_plan(
     dry_run: bool,
 ) -> MovePlan:
     relevant_episodes = relevant_episodes_for_rules(season_state, rules)
-    partial_move = is_specials_complete_rule_enabled(season_state, rules) or not is_fully_monitored_season(season_state, rules)
+    specials_complete_rule = is_specials_complete_rule_enabled(season_state, rules)
+    partial_move = specials_complete_rule or not is_fully_monitored_season(season_state, rules)
     if partial_move:
         move_episodes = [episode for episode in relevant_episodes if episode.path] if result.is_final else movable_final_episodes(season_state, rules)
     else:
         move_episodes = relevant_episodes
+    completed_specials_move = specials_complete_rule and result.is_final and len(move_episodes) == len(relevant_episodes)
+    if completed_specials_move and is_specials_season_identifier(season_state.season_number, season_state.source_folder):
+        unmonitor_season_number = 0
+    elif completed_specials_move:
+        unmonitor_season_number = season_state.season_number
+    elif partial_move:
+        unmonitor_season_number = None
+    else:
+        unmonitor_season_number = season_state.season_number
     temporary_destination = None
     if not partial_move and safety.get("move_to_temporary_folder_first", True):
         temporary_destination = destination + str(safety.get("temporary_suffix", ".__moving__"))
@@ -1469,7 +1479,7 @@ def build_move_plan(
         will_move=bool(move_episodes),
         will_unmonitor=bool(move_episodes),
         will_rescan=True,
-        unmonitor_season_number=None if partial_move or is_specials_complete_rule_enabled(season_state, rules) else season_state.season_number,
+        unmonitor_season_number=unmonitor_season_number,
         unmonitor_episode_ids=[episode.episode_id for episode in move_episodes],
         move_items=move_items,
         episode_count=len(season_state.episodes),

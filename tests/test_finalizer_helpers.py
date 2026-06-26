@@ -430,7 +430,7 @@ class FinalizerHelperTests(unittest.TestCase):
             dry_run=True,
         )
 
-        self.assertIsNone(plan.unmonitor_season_number)
+        self.assertEqual(plan.unmonitor_season_number, 0)
         self.assertEqual(plan.unmonitor_episode_ids, [1, 2])
         self.assertEqual(plan.relevant_episode_count, 2)
 
@@ -554,7 +554,7 @@ class FinalizerHelperTests(unittest.TestCase):
             dry_run=True,
         )
 
-        self.assertIsNone(plan.unmonitor_season_number)
+        self.assertEqual(plan.unmonitor_season_number, 0)
         self.assertEqual(plan.unmonitor_episode_ids, [1, 2])
 
     def test_evaluate_movie_final_uses_radarr_language_fallback(self) -> None:
