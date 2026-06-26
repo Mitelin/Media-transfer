@@ -323,3 +323,28 @@ CONTROL_PANEL_GIT_REMOTE=origin
 ```
 
 Tlačítko `Update app` je během běžící maintenance úlohy zablokované, aby update neproběhl uprostřed přesunu.
+
+Control panel nově umí preferovat persistentní pipeline progress ze souboru `logs/progress-state.json`. Cestu lze změnit proměnnou:
+
+```text
+CONTROL_PANEL_PROGRESS_STATE=/srv/media-transfer/logs/progress-state.json
+```
+
+Pokud soubor existuje a maintenance právě běží, panel z něj počítá jeden monotónní progress bar přes celou pipeline místo odhadu z log tailu. Očekávaný formát je:
+
+```json
+{
+  "phase": "anime",
+  "current_item": "Dr. STONE",
+  "detail": "Season 04 evaluation",
+  "failures": 1,
+  "phases": {
+    "anime": { "done": 37, "total": 241 },
+    "tv": { "done": 0, "total": 109 },
+    "movies": { "done": 0, "total": 53 },
+    "jellyfin": { "done": 0, "total": 1 }
+  }
+}
+```
+
+Význam je záměrně jednoduchý: `total` se spočítá jednou na startu runu, typicky jako počet hlavních složek v `/anime-jp`, `/tv-en`, `/movies-en` a jeden krok pro Jellyfin. `done` se zvyšuje až po dokončení celé položky, ne při jejím startu. Díky tomu se hlavní progress bar během běhu neresetuje mezi anime, TV a movies fází.

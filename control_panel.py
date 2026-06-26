@@ -19,6 +19,7 @@ LOG_LINES = int(os.environ.get("CONTROL_PANEL_LOG_LINES", "500"))
 REPO_DIR = os.environ.get("CONTROL_PANEL_REPO_DIR", os.path.dirname(os.path.abspath(__file__)))
 APP_SERVICE = os.environ.get("CONTROL_PANEL_APP_SERVICE", "media-transfer-control-panel.service")
 UPDATE_REMOTE = os.environ.get("CONTROL_PANEL_GIT_REMOTE", "origin")
+PROGRESS_STATE_PATH = os.environ.get("CONTROL_PANEL_PROGRESS_STATE", os.path.join(REPO_DIR, "logs", "progress-state.json"))
 
 SERVICE = "media-transfer-maintenance.service"
 SESSION_COOKIE = "media_panel_session"
@@ -48,6 +49,12 @@ PROGRESS_STAGES = [
     "start": 62,
     "end": 86,
   },
+]
+PROGRESS_STATE_PHASES = [
+  {"key": "anime", "label": "Anime"},
+  {"key": "tv", "label": "TV"},
+  {"key": "movies", "label": "Movies"},
+  {"key": "jellyfin", "label": "Jellyfin"},
 ]
 
 
@@ -141,6 +148,69 @@ def service_snapshot():
     }
 
 
+def parse_nonnegative_int(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def load_progress_state(path=None):
+    path = path or PROGRESS_STATE_PATH
+    if not path:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def progress_from_state(payload):
+    if not isinstance(payload, dict):
+        return None
+
+    phases = payload.get("phases")
+    if not isinstance(phases, dict):
+        return None
+
+    processed = 0
+    total = 0
+    for phase in PROGRESS_STATE_PHASES:
+        phase_state = phases.get(phase["key"], {})
+        if not isinstance(phase_state, dict):
+            phase_state = {}
+        phase_total = parse_nonnegative_int(phase_state.get("total"))
+        phase_done = parse_nonnegative_int(phase_state.get("done"))
+        total += phase_total
+        processed += min(phase_done, phase_total)
+
+    if total <= 0:
+        return None
+
+    phase_key = str(payload.get("phase") or "").lower()
+    phase = next((item for item in PROGRESS_STATE_PHASES if item["key"] == phase_key), None)
+    phase_label = phase["label"] if phase else (phase_key.title() if phase_key else "Pipeline")
+    current_item = str(payload.get("current_item") or "").strip()
+    detail_text = str(payload.get("detail") or "").strip()
+    detail_parts = [part for part in (current_item, detail_text) if part]
+    detail = " - ".join(detail_parts) if detail_parts else "Approx pipeline progress from persistent state file."
+
+    return {
+        "percent": round((processed / total) * 100),
+        "label": f"{phase_label} pipeline",
+        "detail": detail,
+        "phase": phase_label,
+        "processed": processed,
+        "total": total,
+        "failures": parse_nonnegative_int(payload.get("failures")),
+        "current_item": current_item,
+        "source": "state-file",
+    }
+
+
 def latest_maintenance_logs(logs):
     start_marker = "=== Media Transfer Maintenance START"
     start = logs.rfind(start_marker)
@@ -204,6 +274,11 @@ def estimate_finalizer_progress(logs, failures):
 
 
 def estimate_progress(logs, running=False):
+    if running:
+        state_progress = progress_from_state(load_progress_state())
+        if state_progress:
+            return state_progress
+
     run_logs = latest_maintenance_logs(logs)
     failures = len(re.findall(r"\b(?:ERROR|FAILED|WARNING):", run_logs))
 
@@ -218,6 +293,13 @@ def estimate_progress(logs, running=False):
     }
 
     if not run_logs.strip():
+      if not running:
+        progress.update({
+          "percent": 0,
+          "label": "Idle",
+          "detail": "No active maintenance run detected.",
+          "phase": "Idle",
+        })
         return progress
 
     if "=== Media Transfer Maintenance END" in run_logs:
@@ -596,7 +678,7 @@ class Handler(BaseHTTPRequestHandler):
       <p class="progress-line"><strong id="progressValue">{percent_text(progress["percent"])}</strong> <span id="progressNote" class="muted">{html.escape(progress["detail"])}</span></p>
       <div class="stats">
         <div class="stat"><strong id="phaseLabel">{html.escape(progress["phase"])}</strong><span class="muted">Phase</span></div>
-        <div class="stat"><strong id="jobCount">{progress["processed"]}/{progress["total"]}</strong><span class="muted">Started jobs</span></div>
+        <div class="stat"><strong id="jobCount">{progress["processed"]}/{progress["total"]}</strong><span class="muted">Processed items</span></div>
         <div class="stat"><strong id="failureCount">{progress["failures"]}</strong><span class="muted">Warnings/errors</span></div>
       </div>
     </section>
