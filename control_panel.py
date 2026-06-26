@@ -10,6 +10,11 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+try:
+  import yaml
+except ImportError:
+  yaml = None
+
 HOST = os.environ.get("CONTROL_PANEL_HOST", "0.0.0.0")
 PORT = int(os.environ.get("CONTROL_PANEL_PORT", "8091"))
 
@@ -20,6 +25,7 @@ REPO_DIR = os.environ.get("CONTROL_PANEL_REPO_DIR", os.path.dirname(os.path.absp
 APP_SERVICE = os.environ.get("CONTROL_PANEL_APP_SERVICE", "media-transfer-control-panel.service")
 UPDATE_REMOTE = os.environ.get("CONTROL_PANEL_GIT_REMOTE", "origin")
 PROGRESS_STATE_PATH = os.environ.get("CONTROL_PANEL_PROGRESS_STATE", os.path.join(REPO_DIR, "logs", "progress-state.json"))
+FINALIZER_CONFIG_PATH = os.environ.get("MEDIA_FINALIZER_CONFIG", os.path.join(REPO_DIR, "config", "sonarr-finalizer.yml"))
 
 SERVICE = "media-transfer-maintenance.service"
 SESSION_COOKIE = "media_panel_session"
@@ -27,6 +33,7 @@ SESSIONS = set()
 PROGRESS_STAGES = [
   {
     "key": "anime",
+    "instance_type": "anime",
     "label": "Anime",
     "marker": "### SONARR anime",
     "found_pattern": r"Found (\d+) series in /anime-jp",
@@ -35,6 +42,7 @@ PROGRESS_STAGES = [
   },
   {
     "key": "tv",
+    "instance_type": "tv",
     "label": "TV",
     "marker": "### SONARR tv",
     "found_pattern": r"Found (\d+) series in /tv-en",
@@ -43,6 +51,7 @@ PROGRESS_STAGES = [
   },
   {
     "key": "movies",
+    "instance_type": "movie",
     "label": "Movies",
     "marker": "### RADARR movies",
     "found_pattern": r"Found (\d+) movies in /movies-en",
@@ -211,6 +220,136 @@ def progress_from_state(payload):
     }
 
 
+def load_finalizer_config(path=None):
+    if yaml is None:
+        return None
+    path = path or FINALIZER_CONFIG_PATH
+    if not path:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = yaml.safe_load(handle) or {}
+    except (OSError, ValueError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def resolve_stage_source_prefix(stage, config):
+    mappings = config.get("paths", {}).get("mappings", []) if isinstance(config, dict) else []
+    for mapping in mappings:
+        if not isinstance(mapping, dict):
+            continue
+        if mapping.get("instance_type") == stage.get("instance_type"):
+            prefix = str(mapping.get("source_prefix") or "").strip()
+            if prefix:
+                return prefix
+    return None
+
+
+def resolve_accessible_root(prefix, config):
+    if not prefix:
+        return None
+    if os.path.isdir(prefix):
+        return prefix
+    local_mounts = config.get("paths", {}).get("local_mounts", []) if isinstance(config, dict) else []
+    for mapping in local_mounts:
+        if not isinstance(mapping, dict):
+            continue
+        if str(mapping.get("docker_prefix") or "").strip() != prefix:
+            continue
+        local_prefix = str(mapping.get("local_prefix") or "").strip()
+        if local_prefix and os.path.isdir(local_prefix):
+            return local_prefix
+    return None
+
+
+def count_main_folders(root_path):
+    if not root_path or not os.path.isdir(root_path):
+        return 0
+    try:
+        with os.scandir(root_path) as entries:
+            return sum(1 for entry in entries if entry.is_dir())
+    except OSError:
+        return 0
+
+
+def counted_stage_total(stage, config, logs):
+    prefix = resolve_stage_source_prefix(stage, config)
+    root_path = resolve_accessible_root(prefix, config)
+    total = count_main_folders(root_path)
+    if total > 0:
+        return total, prefix
+
+    marker = stage.get("marker") or ""
+    section_start = logs.rfind(marker) if marker else -1
+    section = logs[section_start:] if section_start >= 0 else logs
+    found = re.search(str(stage.get("found_pattern") or ""), section)
+    return (int(found.group(1)) if found else 0), prefix
+
+
+def top_level_folders_from_logs(logs, prefix):
+    if not logs or not prefix:
+        return set()
+    pattern = re.compile(re.escape(prefix) + r"[/\\]([^/\\\r\n]+)")
+    return {match.group(1).strip().lower() for match in pattern.finditer(logs) if match.group(1).strip()}
+
+
+def current_stage_from_logs(run_logs):
+    latest_stage = None
+    latest_position = -1
+    for stage in PROGRESS_STAGES:
+        position = run_logs.rfind(stage["marker"])
+        if position > latest_position:
+            latest_position = position
+            latest_stage = stage
+    if "=== Jellyfin scheduled task lookup" in run_logs or "Starting Jellyfin library refresh task" in run_logs or "Jellyfin refresh triggered." in run_logs:
+        return {"key": "jellyfin", "label": "Jellyfin"}
+    if "=== Media Transfer batch DONE" in run_logs or "BATCH DONE" in run_logs:
+        return {"key": "jellyfin", "label": "Batch done"}
+    return latest_stage
+
+
+def estimate_folder_pipeline_progress(run_logs, failures):
+    config = load_finalizer_config()
+    if not config:
+        return None
+
+    current_stage = current_stage_from_logs(run_logs)
+    if not current_stage:
+        return None
+
+    total = 1
+    processed = 0
+    stage_counts = {}
+    for stage in PROGRESS_STAGES:
+        stage_total, prefix = counted_stage_total(stage, config, run_logs)
+        stage_processed = min(len(top_level_folders_from_logs(run_logs, prefix)), stage_total) if prefix else 0
+        stage_counts[stage["key"]] = {"total": stage_total, "processed": stage_processed}
+        total += stage_total
+        processed += stage_processed
+
+    if total <= 1 or all(data["total"] == 0 for data in stage_counts.values()):
+        return None
+
+    jellyfin_done = 0
+    if current_stage.get("key") == "jellyfin":
+        processed = sum(data["total"] for data in stage_counts.values())
+        jellyfin_done = 1 if "Jellyfin refresh triggered." in run_logs or "skipping Jellyfin refresh" in run_logs or "refresh task not found" in run_logs or "=== Media Transfer Maintenance END" in run_logs else 0
+        processed += jellyfin_done
+
+    detail = f"Approx {processed} of {total} main folders/steps processed."
+    return {
+        "percent": round((processed / total) * 100),
+        "label": f"{current_stage['label']} pipeline",
+        "detail": detail,
+        "phase": current_stage["label"],
+        "processed": processed,
+        "total": total,
+        "failures": failures,
+        "source": "folder-fallback",
+    }
+
+
 def latest_maintenance_logs(logs):
     start_marker = "=== Media Transfer Maintenance START"
     start = logs.rfind(start_marker)
@@ -278,6 +417,10 @@ def estimate_progress(logs, running=False):
         state_progress = progress_from_state(load_progress_state())
         if state_progress:
             return state_progress
+
+    folder_progress = estimate_folder_pipeline_progress(latest_maintenance_logs(logs), len(re.findall(r"\b(?:ERROR|FAILED|WARNING):", latest_maintenance_logs(logs))))
+    if folder_progress:
+      return folder_progress
 
     run_logs = latest_maintenance_logs(logs)
     failures = len(re.findall(r"\b(?:ERROR|FAILED|WARNING):", run_logs))

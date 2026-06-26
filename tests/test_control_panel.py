@@ -160,6 +160,70 @@ class ControlPanelProgressTests(unittest.TestCase):
         self.assertEqual(progress["phase"], "Idle")
         self.assertEqual(progress["percent"], 0)
 
+    def test_estimate_progress_falls_back_to_folder_counts_without_state_file(self) -> None:
+        original_state_path = control_panel.PROGRESS_STATE_PATH
+        original_config_path = control_panel.FINALIZER_CONFIG_PATH
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                anime_root = os.path.join(temp_dir, "anime-jp")
+                tv_root = os.path.join(temp_dir, "tv-en")
+                movies_root = os.path.join(temp_dir, "movies-en")
+                for root, names in (
+                    (anime_root, ["Dr. Stone", "Bookworm", "Apothecary"]),
+                    (tv_root, ["Body Problem", "Black Mirror"]),
+                    (movies_root, ["Anaconda (2025)"]),
+                ):
+                    os.makedirs(root, exist_ok=True)
+                    for name in names:
+                        os.makedirs(os.path.join(root, name), exist_ok=True)
+
+                config_path = os.path.join(temp_dir, "sonarr-finalizer.yml")
+                with open(config_path, "w", encoding="utf-8") as handle:
+                    handle.write(
+                        "paths:\n"
+                        "  mappings:\n"
+                        f"    - instance_type: \"anime\"\n      source_prefix: \"{anime_root.replace(chr(92), '/')}\"\n"
+                        f"    - instance_type: \"tv\"\n      source_prefix: \"{tv_root.replace(chr(92), '/')}\"\n"
+                        f"    - instance_type: \"movie\"\n      source_prefix: \"{movies_root.replace(chr(92), '/')}\"\n"
+                    )
+
+                control_panel.PROGRESS_STATE_PATH = os.path.join(temp_dir, "missing-progress-state.json")
+                control_panel.FINALIZER_CONFIG_PATH = config_path
+                run_logs = "\n".join(
+                    [
+                        "=== Media Transfer Maintenance START",
+                        "### SONARR anime",
+                        f"Source folder: {anime_root.replace(chr(92), '/')}/Dr. Stone/Season 00",
+                        f"Source folder: {anime_root.replace(chr(92), '/')}/Bookworm/Season 01",
+                        "### SONARR tv",
+                        f"Source folder: {tv_root.replace(chr(92), '/')}/Body Problem/Season 01",
+                    ]
+                )
+
+                progress = control_panel.estimate_progress(run_logs, running=True)
+        finally:
+            control_panel.PROGRESS_STATE_PATH = original_state_path
+            control_panel.FINALIZER_CONFIG_PATH = original_config_path
+
+        self.assertEqual(progress["phase"], "TV")
+        self.assertEqual(progress["processed"], 3)
+        self.assertEqual(progress["total"], 7)
+        self.assertEqual(progress["percent"], 43)
+
+    def test_folder_progress_deduplicates_multiple_seasons_of_same_show(self) -> None:
+        folders = control_panel.top_level_folders_from_logs(
+            "\n".join(
+                [
+                    "Source folder: /anime-jp/Dr. Stone/Season 00",
+                    "Source folder: /anime-jp/Dr. Stone/Season 04",
+                    "DRY RUN: would move /anime-jp/Dr. Stone/Season 00 to /anime-en/Dr. Stone/Season 00",
+                ]
+            ),
+            "/anime-jp",
+        )
+
+        self.assertEqual(folders, {"dr. stone"})
+
 
 if __name__ == "__main__":
     unittest.main()
