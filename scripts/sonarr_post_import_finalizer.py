@@ -859,6 +859,37 @@ def build_season_state(
     )
 
 
+def season_numbers_for_series(episodes: list[dict[str, Any]], episode_files: list[dict[str, Any]]) -> list[int]:
+    season_numbers: set[int] = set()
+    files_by_id = episode_file_by_id(episode_files)
+
+    for episode in episodes:
+        season_number = parse_int(episode.get("seasonNumber"))
+        if season_number is not None:
+            season_numbers.add(season_number)
+
+        episode_file_id = parse_int(episode.get("episodeFileId"))
+        episode_file = files_by_id.get(episode_file_id) if episode_file_id is not None else None
+        inferred_from_file = infer_season_from_path(episode_file.get("path") if episode_file else None)
+        if inferred_from_file is not None:
+            season_numbers.add(inferred_from_file)
+
+    return sorted(season_numbers)
+
+
+def determine_sonarr_season_numbers_to_process(
+    series: dict[str, Any],
+    context: EventContext,
+    episodes: list[dict[str, Any]],
+    episode_files: list[dict[str, Any]],
+    inspect_season: bool = False,
+) -> list[int]:
+    del series, episodes, episode_files, inspect_season
+    if context.season_number is None:
+        return []
+    return [context.season_number]
+
+
 def log_season_state_detail(season_state: SeasonState, rules: dict[str, Any]) -> None:
     evaluate_monitored_only = bool(rules.get("evaluate_monitored_only", True))
     relevant_count = 0
@@ -1343,6 +1374,15 @@ def movable_final_episodes(season_state: SeasonState, rules: dict[str, Any]) -> 
     return [episode for episode in relevant_episodes_for_rules(season_state, rules) if episode.is_final and episode.path]
 
 
+def is_fully_monitored_season(season_state: SeasonState, rules: dict[str, Any]) -> bool:
+    if not season_state.episodes:
+        return True
+    relevant_episodes = relevant_episodes_for_rules(season_state, rules)
+    if not relevant_episodes:
+        return False
+    return len(relevant_episodes) == len(season_state.episodes) and all(episode.monitored for episode in season_state.episodes)
+
+
 def missing_required_episodes(season_state: SeasonState, rules: dict[str, Any]) -> list[EpisodeState]:
     return [episode for episode in relevant_episodes_for_rules(season_state, rules) if not episode.has_file]
 
@@ -1403,8 +1443,11 @@ def build_move_plan(
     dry_run: bool,
 ) -> MovePlan:
     relevant_episodes = relevant_episodes_for_rules(season_state, rules)
-    partial_move = not result.is_final
-    move_episodes = movable_final_episodes(season_state, rules) if partial_move else relevant_episodes
+    partial_move = is_specials_complete_rule_enabled(season_state, rules) or not is_fully_monitored_season(season_state, rules)
+    if partial_move:
+        move_episodes = [episode for episode in relevant_episodes if episode.path] if result.is_final else movable_final_episodes(season_state, rules)
+    else:
+        move_episodes = relevant_episodes
     temporary_destination = None
     if not partial_move and safety.get("move_to_temporary_folder_first", True):
         temporary_destination = destination + str(safety.get("temporary_suffix", ".__moving__"))
@@ -1692,6 +1735,125 @@ def log_evaluation(result: EvaluationResult) -> None:
         )
 
 
+def process_sonarr_season(
+    client: SonarrClient,
+    config: dict[str, Any],
+    rules: dict[str, Any],
+    safety: dict[str, Any],
+    dry_run: bool,
+    args: argparse.Namespace,
+    series: dict[str, Any],
+    episodes: list[dict[str, Any]],
+    episode_files: list[dict[str, Any]],
+    context: EventContext,
+    season_number: int,
+) -> int:
+    season_context = EventContext(
+        event_type=context.event_type,
+        series_id=context.series_id,
+        series_title=context.series_title,
+        series_path=context.series_path,
+        season_number=season_number,
+        imported_file_path=context.imported_file_path,
+        episode_file_id=context.episode_file_id,
+    )
+
+    if season_context.season_number == 0 and safety.get("skip_specials", True) and not rules.get("move_specials_when_complete", True):
+        LOG.info("Skipping specials season 0")
+        return 0
+
+    season_state = build_season_state(series, episodes, episode_files, season_context)
+    LOG.info(
+        "Season state: series=%s season=%s source=%s episodes=%s",
+        season_state.series_title,
+        season_state.season_number,
+        season_state.source_folder,
+        len(season_state.episodes),
+    )
+    log_season_state_detail(season_state, rules)
+
+    if args.inspect_season:
+        LOG.info("Inspect-season mode enabled. Stopping before ffprobe/evaluation.")
+        return 0
+
+    target_language = target_language_from_rules(rules)
+    mapping = find_path_mapping(config, str(get_active_instance_config(config, args.instance).get("instance_type")), season_state.source_folder or "", target_language)
+    if not mapping:
+        LOG.info(
+            "Season source is not a configured maintenance source for target_language=%s. Skipping before language evaluation: %s",
+            target_language,
+            season_state.source_folder,
+        )
+        return 0
+
+    result = evaluate_season_final(season_state, rules, safety, config, args.enable_local_mounts)
+    log_evaluation(result)
+    if not season_state.source_folder:
+        LOG.error("Cannot determine source season folder")
+        return 2
+    if not result.is_final:
+        specials_bypass = is_specials_complete_rule_enabled(season_state, rules)
+        fully_monitored = is_fully_monitored_season(season_state, rules)
+        missing_episodes = missing_required_episodes(season_state, rules)
+        if missing_episodes:
+            if specials_bypass and movable_final_episodes(season_state, rules):
+                LOG.info(
+                    "Specials season is incomplete, but moving downloaded specials without completeness check: %s",
+                    [episode.episode_number for episode in missing_episodes],
+                )
+            elif specials_bypass:
+                LOG.info("Specials season has no downloaded files yet. Nothing to do.")
+                return 0
+            elif fully_monitored:
+                LOG.info(
+                    "Season has monitored/relevant missing episodes. Treating as in-progress and not moving anything: %s",
+                    [episode.episode_number for episode in missing_episodes],
+                )
+                return 0
+            else:
+                LOG.info(
+                    "Season is not fully monitored. Moving any already-final episode files only; missing episodes stay in place: %s",
+                    [episode.episode_number for episode in missing_episodes],
+                )
+        if fully_monitored and not specials_bypass:
+            LOG.info("Season folder is not fully final yet. Nothing to do.")
+            return 0
+        if not movable_final_episodes(season_state, rules):
+            LOG.info("Season has no final movable episodes yet. Nothing to do.")
+            return 0
+        if specials_bypass:
+            LOG.info("Specials are only partially ready. Planning move for final episode files only.")
+        else:
+            LOG.info("Season is not fully monitored and partially ready. Planning move for final episode files only.")
+
+    destination = determine_destination(season_state.source_folder, mapping)
+    move_plan = build_move_plan(season_state, mapping, destination, result, rules, safety, dry_run)
+    LOG.info("Selected mapping: %s", mapping.get("name"))
+    LOG.info("Source folder: %s", move_plan.source_folder)
+    LOG.info("Destination folder: %s", move_plan.destination_folder)
+    log_move_plan(move_plan)
+
+    if dry_run:
+        log_source_parent_cleanup_plan(move_plan, mapping)
+        return 0
+
+    preflight = preflight_move_plan(move_plan, safety)
+    log_move_preflight(preflight)
+    if preflight.errors:
+        LOG.error("Move preflight failed. Not moving and not unmonitoring.")
+        return 1
+
+    if move_plan.partial_move:
+        move_episode_files(move_plan.move_items, safety)
+    else:
+        move_season(move_plan.source_folder, move_plan.destination_folder, safety)
+    cleanup_empty_source_parent(move_plan, mapping)
+    unmonitor_after_move(client, move_plan)
+    client.rescan_series(season_state.series_id)
+    LOG.info("Done")
+    return 0
+
+
 def run_radarr_flow(
     client: RadarrClient,
     config: dict[str, Any],
@@ -1869,97 +2031,35 @@ def main() -> int:
     episode_files = client.get_episode_files(context.series_id)
     context = resolve_missing_event_context(context, episode_files)
 
-    if context.season_number is None:
-        LOG.error("Could not determine season number")
-        return 2
-
     rules_by_type = config.get("rules", {})
     instance_type = str(instance_config.get("instance_type"))
     rules = rules_by_type.get(instance_type, {})
-    if context.season_number == 0 and safety.get("skip_specials", True) and not rules.get("move_specials_when_complete", True):
-        LOG.info("Skipping specials season 0")
-        return 0
-    season_state = build_season_state(series, episodes, episode_files, context)
-    LOG.info(
-        "Season state: series=%s season=%s source=%s episodes=%s",
-        season_state.series_title,
-        season_state.season_number,
-        season_state.source_folder,
-        len(season_state.episodes),
-    )
-    log_season_state_detail(season_state, rules)
-
-    if args.inspect_season:
-        LOG.info("Inspect-season mode enabled. Stopping before ffprobe/evaluation.")
-        return 0
-
-    target_language = target_language_from_rules(rules)
-    mapping = find_path_mapping(config, instance_type, season_state.source_folder or "", target_language)
-    if not mapping:
-        LOG.info(
-            "Season source is not a configured maintenance source for target_language=%s. Skipping before language evaluation: %s",
-            target_language,
-            season_state.source_folder,
-        )
-        return 0
-
-    result = evaluate_season_final(season_state, rules, safety, config, args.enable_local_mounts)
-    log_evaluation(result)
-    if not season_state.source_folder:
-        LOG.error("Cannot determine source season folder")
+    season_numbers = determine_sonarr_season_numbers_to_process(series, context, episodes, episode_files, inspect_season=args.inspect_season)
+    if not season_numbers:
+        LOG.error("Could not determine season number")
         return 2
-    if not result.is_final:
-        specials_bypass = is_specials_complete_rule_enabled(season_state, rules)
-        missing_episodes = missing_required_episodes(season_state, rules)
-        if missing_episodes:
-            if specials_bypass and movable_final_episodes(season_state, rules):
-                LOG.info(
-                    "Specials season is incomplete, but moving downloaded specials without completeness check: %s",
-                    [episode.episode_number for episode in missing_episodes],
-                )
-            elif specials_bypass:
-                LOG.info("Specials season has no downloaded files yet. Nothing to do.")
-                return 0
-            else:
-                LOG.info(
-                    "Season has monitored/relevant missing episodes. Treating as in-progress and not moving anything: %s",
-                    [episode.episode_number for episode in missing_episodes],
-                )
-                return 0
-        if is_physical_season_folder(season_state.source_folder) and not specials_bypass:
-            LOG.info("Season folder is not fully final yet. Nothing to do.")
-            return 0
-        if not movable_final_episodes(season_state, rules):
-            LOG.info("Loose season folder has no final movable episodes yet. Nothing to do.")
-            return 0
-        LOG.info("Loose season folder is partially final. Planning move for final episode files only.")
 
-    destination = determine_destination(season_state.source_folder, mapping)
-    move_plan = build_move_plan(season_state, mapping, destination, result, rules, safety, dry_run)
-    LOG.info("Selected mapping: %s", mapping.get("name"))
-    LOG.info("Source folder: %s", move_plan.source_folder)
-    LOG.info("Destination folder: %s", move_plan.destination_folder)
-    log_move_plan(move_plan)
+    overall_exit_code = 0
+    for season_number in season_numbers:
+        exit_code = process_sonarr_season(
+            client,
+            config,
+            rules,
+            safety,
+            dry_run,
+            args,
+            series,
+            episodes,
+            episode_files,
+            context,
+            season_number,
+        )
+        if exit_code != 0 and overall_exit_code == 0:
+            overall_exit_code = exit_code
+        if args.inspect_season and exit_code != 0:
+            return exit_code
 
-    if dry_run:
-        log_source_parent_cleanup_plan(move_plan, mapping)
-        return 0
-
-    preflight = preflight_move_plan(move_plan, safety)
-    log_move_preflight(preflight)
-    if preflight.errors:
-        LOG.error("Move preflight failed. Not moving and not unmonitoring.")
-        return 1
-
-    if move_plan.partial_move:
-        move_episode_files(move_plan.move_items, safety)
-    else:
-        move_season(move_plan.source_folder, move_plan.destination_folder, safety)
-    cleanup_empty_source_parent(move_plan, mapping)
-    unmonitor_after_move(client, move_plan)
-    client.rescan_series(season_state.series_id)
-    LOG.info("Done")
-    return 0
+    return overall_exit_code
 
 
 if __name__ == "__main__":

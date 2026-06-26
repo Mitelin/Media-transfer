@@ -128,6 +128,101 @@ class FinalizerHelperTests(unittest.TestCase):
 
         self.assertEqual(season_state.source_folder, "/anime-jp/Example Specials/Season 00")
 
+    def test_determine_sonarr_season_numbers_to_process_keeps_affected_season(self) -> None:
+        series = {
+            "seasons": [
+                {"seasonNumber": 0, "monitored": True},
+                {"seasonNumber": 4, "monitored": True},
+            ]
+        }
+        context = finalizer.EventContext(
+            event_type="Download",
+            series_id=274,
+            series_title="Dr. STONE",
+            series_path="/anime-jp/Dr. Stone",
+            season_number=4,
+            imported_file_path="/anime-jp/Dr. Stone/Season 04/Dr. STONE - S04E37.mkv",
+            episode_file_id=12529,
+        )
+        episodes = [
+            {"id": 1, "episodeNumber": 1, "seasonNumber": 0, "monitored": True, "hasFile": True, "episodeFileId": 101},
+            {"id": 2, "episodeNumber": 1, "seasonNumber": 4, "monitored": True, "hasFile": True, "episodeFileId": 401},
+        ]
+        episode_files = [
+            {"id": 101, "path": "/anime-jp/Dr. Stone/Season 00/OVA 01.mkv"},
+            {"id": 401, "path": "/anime-jp/Dr. Stone/Season 04/Dr. STONE - S04E01.mkv"},
+        ]
+
+        season_numbers = finalizer.determine_sonarr_season_numbers_to_process(series, context, episodes, episode_files)
+
+        self.assertEqual(season_numbers, [4])
+
+    def test_determine_sonarr_season_numbers_to_process_keeps_inspect_targeted(self) -> None:
+        series = {
+            "seasons": [
+                {"seasonNumber": 0, "monitored": True},
+                {"seasonNumber": 4, "monitored": True},
+            ]
+        }
+        context = finalizer.EventContext(
+            event_type="Download",
+            series_id=274,
+            series_title="Dr. STONE",
+            series_path="/anime-jp/Dr. Stone",
+            season_number=4,
+            imported_file_path="/anime-jp/Dr. Stone/Season 04/Dr. STONE - S04E37.mkv",
+            episode_file_id=12529,
+        )
+        episodes = [
+            {"id": 1, "episodeNumber": 1, "seasonNumber": 0, "monitored": True, "hasFile": True, "episodeFileId": 101},
+            {"id": 2, "episodeNumber": 1, "seasonNumber": 4, "monitored": True, "hasFile": True, "episodeFileId": 401},
+        ]
+        episode_files = [
+            {"id": 101, "path": "/anime-jp/Dr. Stone/Season 00/OVA 01.mkv"},
+            {"id": 401, "path": "/anime-jp/Dr. Stone/Season 04/Dr. STONE - S04E01.mkv"},
+        ]
+
+        season_numbers = finalizer.determine_sonarr_season_numbers_to_process(
+            series,
+            context,
+            episodes,
+            episode_files,
+            inspect_season=True,
+        )
+
+        self.assertEqual(season_numbers, [4])
+
+    def test_determine_sonarr_season_numbers_to_process_returns_empty_without_context_season(self) -> None:
+        series = {
+            "seasons": [
+                {"seasonNumber": 0, "monitored": True},
+                {"seasonNumber": 4, "monitored": True},
+                {"seasonNumber": 3, "monitored": False},
+            ]
+        }
+        context = finalizer.EventContext(
+            event_type="Download",
+            series_id=274,
+            series_title="Dr. STONE",
+            series_path="/anime-jp/Dr. Stone",
+            season_number=None,
+            imported_file_path="/anime-jp/Dr. Stone/Season 04/Dr. STONE - S04E37.mkv",
+            episode_file_id=12529,
+        )
+        episodes = [
+            {"id": 1, "episodeNumber": 1, "seasonNumber": 0, "monitored": True, "hasFile": True, "episodeFileId": 101},
+            {"id": 2, "episodeNumber": 1, "seasonNumber": 3, "monitored": False, "hasFile": False, "episodeFileId": 0},
+            {"id": 3, "episodeNumber": 1, "seasonNumber": 4, "monitored": True, "hasFile": True, "episodeFileId": 401},
+        ]
+        episode_files = [
+            {"id": 101, "path": "/anime-jp/Dr. Stone/Season 00/OVA 01.mkv"},
+            {"id": 401, "path": "/anime-jp/Dr. Stone/Season 04/Dr. STONE - S04E01.mkv"},
+        ]
+
+        season_numbers = finalizer.determine_sonarr_season_numbers_to_process(series, context, episodes, episode_files)
+
+        self.assertEqual(season_numbers, [])
+
     def test_evaluate_season_final_can_merge_sonarr_languages_with_ffprobe(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             media_path = Path(temp_dir) / "Bookworm S04E03.mkv"
@@ -719,15 +814,17 @@ class FinalizerHelperTests(unittest.TestCase):
         self.assertEqual(plan.mapping_name, "TV English maintenance to Czech target")
         self.assertEqual(plan.source_folder, "/tv-en/Example Show/Season 02")
         self.assertEqual(plan.destination_folder, "/tv-cz/Example Show/Season 02")
-        self.assertEqual(plan.temporary_destination_folder, "/tv-cz/Example Show/Season 02.__moving__")
+        self.assertIsNone(plan.temporary_destination_folder)
         self.assertTrue(plan.dry_run)
-        self.assertFalse(plan.partial_move)
+        self.assertTrue(plan.partial_move)
         self.assertTrue(plan.will_move)
         self.assertTrue(plan.will_unmonitor)
         self.assertTrue(plan.will_rescan)
-        self.assertEqual(plan.unmonitor_season_number, 2)
+        self.assertIsNone(plan.unmonitor_season_number)
         self.assertEqual(plan.unmonitor_episode_ids, [1])
-        self.assertEqual(plan.move_items, [])
+        self.assertEqual(len(plan.move_items), 1)
+        self.assertEqual(plan.move_items[0].source_path, "/tv-en/Example Show/Season 02/Episode 01.mkv")
+        self.assertEqual(plan.move_items[0].destination_path, "/tv-cz/Example Show/Season 02/Episode 01.mkv")
         self.assertEqual(plan.episode_count, 2)
         self.assertEqual(plan.relevant_episode_count, 1)
         self.assertEqual(plan.episode_file_count, 1)
@@ -751,7 +848,7 @@ class FinalizerHelperTests(unittest.TestCase):
                 finalizer.EpisodeState(
                     episode_id=11,
                     episode_number=2,
-                    monitored=True,
+                    monitored=False,
                     has_file=True,
                     episode_file_id=101,
                     path="/anime-jp/HELL MODE/HELL MODE S01E02.mkv",
@@ -760,7 +857,7 @@ class FinalizerHelperTests(unittest.TestCase):
                 finalizer.EpisodeState(
                     episode_id=12,
                     episode_number=3,
-                    monitored=True,
+                    monitored=False,
                     has_file=True,
                     episode_file_id=102,
                     path="/anime-jp/HELL MODE/HELL MODE S01E03.mkv",
@@ -783,12 +880,56 @@ class FinalizerHelperTests(unittest.TestCase):
         self.assertIsNone(plan.unmonitor_season_number)
         self.assertEqual(plan.unmonitor_episode_ids, [10])
         self.assertEqual(plan.episode_count, 3)
-        self.assertEqual(plan.relevant_episode_count, 3)
+        self.assertEqual(plan.relevant_episode_count, 1)
         self.assertEqual(plan.episode_file_count, 1)
         self.assertEqual(len(plan.move_items), 1)
         self.assertEqual(plan.move_items[0].source_path, "/anime-jp/HELL MODE/HELL MODE S01E01.mkv")
         self.assertEqual(plan.move_items[0].destination_path, "/anime-en/HELL MODE/HELL MODE S01E01.mkv")
         self.assertEqual(plan.move_items[0].temporary_destination_path, "/anime-en/HELL MODE/HELL MODE S01E01.mkv.__moving__")
+
+    def test_build_move_plan_uses_partial_move_for_complete_but_partially_monitored_season(self) -> None:
+        season_state = finalizer.SeasonState(
+            series_id=253,
+            series_title="HELL MODE",
+            season_number=1,
+            source_folder="/anime-jp/HELL MODE/Season 01",
+            episodes=[
+                finalizer.EpisodeState(
+                    episode_id=10,
+                    episode_number=1,
+                    monitored=True,
+                    has_file=True,
+                    episode_file_id=100,
+                    path="/anime-jp/HELL MODE/Season 01/HELL MODE S01E01.mkv",
+                    is_final=True,
+                ),
+                finalizer.EpisodeState(
+                    episode_id=11,
+                    episode_number=2,
+                    monitored=False,
+                    has_file=True,
+                    episode_file_id=101,
+                    path="/anime-jp/HELL MODE/Season 01/HELL MODE S01E02.mkv",
+                    is_final=False,
+                ),
+            ],
+        )
+
+        plan = finalizer.build_move_plan(
+            season_state,
+            {"name": "anime", "source_prefix": "/anime-jp", "target_prefix": "/anime-en"},
+            "/anime-en/HELL MODE/Season 01",
+            finalizer.EvaluationResult(True, "en", "all relevant episodes are final", []),
+            {"evaluate_monitored_only": True},
+            {"move_to_temporary_folder_first": True, "temporary_suffix": ".__moving__"},
+            dry_run=True,
+        )
+
+        self.assertTrue(plan.partial_move)
+        self.assertIsNone(plan.unmonitor_season_number)
+        self.assertEqual(plan.unmonitor_episode_ids, [10])
+        self.assertEqual(len(plan.move_items), 1)
+        self.assertEqual(plan.move_items[0].destination_path, "/anime-en/HELL MODE/Season 01/HELL MODE S01E01.mkv")
 
     def test_missing_required_episodes_detects_monitored_missing_files(self) -> None:
         season_state = finalizer.SeasonState(
@@ -1495,6 +1636,157 @@ class FinalizerHelperTests(unittest.TestCase):
         finalizer.unmonitor_after_move(client, plan)
 
         self.assertEqual(client.calls, [("episodes", [1, 2])])
+
+    def test_process_sonarr_season_blocks_fully_monitored_normal_season_until_final(self) -> None:
+        season_state = finalizer.SeasonState(
+            series_id=274,
+            series_title="Dr. STONE",
+            season_number=4,
+            source_folder="/anime-jp/Dr. Stone/Season 04",
+            episodes=[
+                finalizer.EpisodeState(1, 1, True, True, 101, "/anime-jp/Dr. Stone/Season 04/Dr. STONE - S04E01.mkv", is_final=True),
+                finalizer.EpisodeState(2, 2, True, True, 102, "/anime-jp/Dr. Stone/Season 04/Dr. STONE - S04E02.mkv", is_final=False),
+            ],
+        )
+        called: dict[str, bool] = {"build_move_plan": False}
+        original_build_season_state = finalizer.build_season_state
+        original_log_season_state_detail = finalizer.log_season_state_detail
+        original_find_path_mapping = finalizer.find_path_mapping
+        original_evaluate_season_final = finalizer.evaluate_season_final
+        original_build_move_plan = finalizer.build_move_plan
+
+        def fail_build_move_plan(*args, **kwargs):
+            called["build_move_plan"] = True
+            raise AssertionError("build_move_plan should not be called for a non-final fully monitored normal season")
+
+        finalizer.build_season_state = lambda *args, **kwargs: season_state
+        finalizer.log_season_state_detail = lambda *args, **kwargs: None
+        finalizer.find_path_mapping = lambda *args, **kwargs: {"name": "anime", "source_prefix": "/anime-jp", "target_prefix": "/anime-en"}
+        finalizer.evaluate_season_final = lambda *args, **kwargs: finalizer.EvaluationResult(False, "en", "one or more episodes are not final", [season_state.episodes[1]])
+        finalizer.build_move_plan = fail_build_move_plan
+        try:
+            exit_code = finalizer.process_sonarr_season(
+                client=object(),
+                config={
+                    "active_instance": "anime",
+                    "sonarr_instances": {
+                        "anime": {"url": "http://example", "api_key": "key", "instance_type": "anime"}
+                    },
+                },
+                rules={
+                    "allowed_final_audio_languages": ["en"],
+                    "evaluate_monitored_only": True,
+                    "require_all_episode_files": True,
+                },
+                safety={"skip_specials": True},
+                dry_run=True,
+                args=finalizer.argparse.Namespace(inspect_season=False, instance="anime", enable_local_mounts=False),
+                series={"title": "Dr. STONE"},
+                episodes=[],
+                episode_files=[],
+                context=finalizer.EventContext("Download", 274, None, None, 4, None, None),
+                season_number=4,
+            )
+        finally:
+            finalizer.build_season_state = original_build_season_state
+            finalizer.log_season_state_detail = original_log_season_state_detail
+            finalizer.find_path_mapping = original_find_path_mapping
+            finalizer.evaluate_season_final = original_evaluate_season_final
+            finalizer.build_move_plan = original_build_move_plan
+
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(called["build_move_plan"])
+
+    def test_process_sonarr_season_allows_specials_partial_move_even_when_season_not_final(self) -> None:
+        season_state = finalizer.SeasonState(
+            series_id=274,
+            series_title="Dr. STONE",
+            season_number=0,
+            source_folder="/anime-jp/Dr. Stone/Season 00",
+            episodes=[
+                finalizer.EpisodeState(10476, 1, True, True, 12415, "/anime-jp/Dr. Stone/Season 00/Dr. STONE - S00E01.mkv", is_final=True),
+                finalizer.EpisodeState(10477, 2, True, False, None, None, is_final=False),
+            ],
+        )
+        called: dict[str, bool] = {"build_move_plan": False}
+        original_build_season_state = finalizer.build_season_state
+        original_log_season_state_detail = finalizer.log_season_state_detail
+        original_find_path_mapping = finalizer.find_path_mapping
+        original_evaluate_season_final = finalizer.evaluate_season_final
+        original_determine_destination = finalizer.determine_destination
+        original_build_move_plan = finalizer.build_move_plan
+        original_log_move_plan = finalizer.log_move_plan
+        original_log_source_parent_cleanup_plan = finalizer.log_source_parent_cleanup_plan
+
+        def fake_build_move_plan(*args, **kwargs):
+            called["build_move_plan"] = True
+            return finalizer.MovePlan(
+                series_id=274,
+                series_title="Dr. STONE",
+                season_number=0,
+                mapping_name="anime",
+                target_language="en",
+                source_folder="/anime-jp/Dr. Stone/Season 00",
+                destination_folder="/anime-en/Dr. Stone/Season 00",
+                temporary_destination_folder=None,
+                dry_run=True,
+                move_method="rename",
+                partial_move=True,
+                will_move=True,
+                will_unmonitor=True,
+                will_rescan=True,
+                unmonitor_season_number=None,
+                unmonitor_episode_ids=[10476],
+                move_items=[],
+                episode_count=2,
+                relevant_episode_count=2,
+                episode_file_count=1,
+            )
+
+        finalizer.build_season_state = lambda *args, **kwargs: season_state
+        finalizer.log_season_state_detail = lambda *args, **kwargs: None
+        finalizer.find_path_mapping = lambda *args, **kwargs: {"name": "anime", "source_prefix": "/anime-jp", "target_prefix": "/anime-en"}
+        finalizer.evaluate_season_final = lambda *args, **kwargs: finalizer.EvaluationResult(False, "en", "moving downloaded specials without completeness check", [season_state.episodes[1]])
+        finalizer.determine_destination = lambda *args, **kwargs: "/anime-en/Dr. Stone/Season 00"
+        finalizer.build_move_plan = fake_build_move_plan
+        finalizer.log_move_plan = lambda *args, **kwargs: None
+        finalizer.log_source_parent_cleanup_plan = lambda *args, **kwargs: None
+        try:
+            exit_code = finalizer.process_sonarr_season(
+                client=object(),
+                config={
+                    "active_instance": "anime",
+                    "sonarr_instances": {
+                        "anime": {"url": "http://example", "api_key": "key", "instance_type": "anime"}
+                    },
+                },
+                rules={
+                    "allowed_final_audio_languages": ["en"],
+                    "evaluate_monitored_only": True,
+                    "require_all_episode_files": True,
+                    "move_specials_when_complete": True,
+                },
+                safety={"skip_specials": True},
+                dry_run=True,
+                args=finalizer.argparse.Namespace(inspect_season=False, instance="anime", enable_local_mounts=False),
+                series={"title": "Dr. STONE"},
+                episodes=[],
+                episode_files=[],
+                context=finalizer.EventContext("Download", 274, None, None, 0, None, None),
+                season_number=0,
+            )
+        finally:
+            finalizer.build_season_state = original_build_season_state
+            finalizer.log_season_state_detail = original_log_season_state_detail
+            finalizer.find_path_mapping = original_find_path_mapping
+            finalizer.evaluate_season_final = original_evaluate_season_final
+            finalizer.determine_destination = original_determine_destination
+            finalizer.build_move_plan = original_build_move_plan
+            finalizer.log_move_plan = original_log_move_plan
+            finalizer.log_source_parent_cleanup_plan = original_log_source_parent_cleanup_plan
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(called["build_move_plan"])
 
 
 if __name__ == "__main__":
